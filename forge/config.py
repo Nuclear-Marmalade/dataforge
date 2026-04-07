@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -320,11 +320,11 @@ class ForgeConfig:
         if key not in valid_keys:
             raise ValueError(f"Unknown config key: {key}")
         field_type = type(getattr(self, key))
-        if field_type == int:
+        if field_type is int:
             setattr(self, key, int(value))
-        elif field_type == float:
+        elif field_type is float:
             setattr(self, key, float(value))
-        elif field_type == bool:
+        elif field_type is bool:
             setattr(self, key, value.lower() in ('true', '1', 'yes'))
         else:
             setattr(self, key, value)
@@ -348,7 +348,7 @@ class ForgeConfig:
             'dashboard_port': 'dashboard',
         }
 
-        sections = {}
+        sections: dict[str, list[tuple[str, str]]] = {}
         for key, value in d.items():
             if key.startswith('_'):
                 continue

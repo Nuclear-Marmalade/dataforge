@@ -14,10 +14,8 @@ Depended on by: enrichment/pipeline.py
 
 from __future__ import annotations
 
-import json
 import logging
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 # psycopg2 imported lazily in methods that need it
 
@@ -84,7 +82,7 @@ def validate_field(field_name: str, value: Any) -> tuple[bool, str]:
 
     Returns (is_valid, error_message).
     """
-    rules = FIELD_VALIDATORS.get(field_name)
+    rules: Any = FIELD_VALIDATORS.get(field_name)
     if not rules:
         return True, ""  # No rules = allow
 
@@ -96,12 +94,12 @@ def validate_field(field_name: str, value: Any) -> tuple[bool, str]:
                 return False, f"{field_name}: expected {expected_type}, got {type(value).__name__}"
         elif not isinstance(value, expected_type):
             # Allow int for bool fields, string for int fields with conversion
-            if expected_type == int and isinstance(value, (float, str)):
+            if expected_type is int and isinstance(value, (float, str)):
                 try:
                     int(value)
                 except (ValueError, TypeError):
                     return False, f"{field_name}: cannot convert to int"
-            elif expected_type == bool and isinstance(value, int):
+            elif expected_type is bool and isinstance(value, int):
                 pass  # int is ok for bool
             else:
                 return False, f"{field_name}: expected {expected_type.__name__}, got {type(value).__name__}"

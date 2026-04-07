@@ -189,7 +189,6 @@ class TestTransactions:
 
     def test_tx_fetch_dicts_preserves_row_factory(self, sqlite_db):
         """Round 8 regression: tx.fetch_dicts() must not permanently mutate row_factory."""
-        import sqlite3
 
         sqlite_db.upsert_business({"name": "Test", "state": "FL"})
         factory_before = sqlite_db._backend._conn.row_factory
@@ -371,6 +370,5 @@ class TestPrepareValue:
         assert len(val) == 1000
 
 
-# Need csv import for test
-import csv
-import os
+import csv  # noqa: E402
+import os  # noqa: E402

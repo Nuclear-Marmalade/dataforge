@@ -1,7 +1,5 @@
 """Security regression tests -- one per bug from nine audit rounds."""
 import inspect
-import pytest
-import os
 
 
 class TestSQLInjection:
@@ -103,12 +101,10 @@ class TestCSPMiddleware:
 class TestSafetyModules:
     def test_audit_agent_imports_without_psycopg2(self):
         """Round 9: safety modules must not crash on SQLite."""
-        from forge.safety.audit_agent import HaikuAuditAgent
         # Just importing should not crash even without psycopg2
 
     def test_error_recovery_imports_without_psycopg2(self):
         """Safety modules should import cleanly."""
-        from forge.safety.error_recovery import validate_field
         # Should not crash
 
     def test_validate_field_email(self):

@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 import logging
 import os
 import signal
@@ -32,7 +31,7 @@ import tempfile
 import time
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, List, NoReturn, Optional
 
 try:
     from forge import __version__
@@ -185,7 +184,7 @@ def setup_logging(verbose: bool = False, quiet: bool = False) -> logging.Logger:
 # Error helpers
 # ---------------------------------------------------------------------------
 
-def die(message: str, hint: str = "", exit_code: int = 1) -> None:
+def die(message: str, hint: str = "", exit_code: int = 1) -> "NoReturn":
     """Print an error message and exit."""
     sys.stderr.write(f"{red('Error:')} {message}\n")
     if hint:
@@ -551,7 +550,7 @@ def _run_database_enrich(args: argparse.Namespace, logger: logging.Logger) -> No
 
 def cmd_import(args: argparse.Namespace) -> None:
     """Import a CSV file into the persistent database."""
-    logger = setup_logging(verbose=args.verbose, quiet=args.quiet)
+    setup_logging(verbose=args.verbose, quiet=args.quiet)
 
     from forge.config import ForgeConfig
     from forge.db import ForgeDB
@@ -634,7 +633,7 @@ def cmd_import(args: argparse.Namespace) -> None:
 
 def cmd_export(args: argparse.Namespace) -> None:
     """Export enriched data from the database."""
-    logger = setup_logging(verbose=args.verbose, quiet=args.quiet)
+    setup_logging(verbose=args.verbose, quiet=args.quiet)
 
     from forge.config import ForgeConfig
     from forge.db import ForgeDB
@@ -692,7 +691,7 @@ def cmd_export(args: argparse.Namespace) -> None:
 
 def cmd_status(args: argparse.Namespace) -> None:
     """Show enrichment statistics for the current database."""
-    logger = setup_logging(verbose=args.verbose, quiet=args.quiet)
+    setup_logging(verbose=args.verbose, quiet=args.quiet)
 
     from forge.config import ForgeConfig
     from forge.db import ForgeDB
@@ -776,7 +775,7 @@ def cmd_status(args: argparse.Namespace) -> None:
 
 def cmd_config(args: argparse.Namespace) -> None:
     """Show or set configuration values."""
-    logger = setup_logging(verbose=args.verbose, quiet=args.quiet)
+    setup_logging(verbose=args.verbose, quiet=args.quiet)
 
     from forge.config import ForgeConfig
 
@@ -890,9 +889,9 @@ def cmd_discover(args: argparse.Namespace) -> None:
         disco = OvertureDiscovery()
         results = disco.search(
             zip_code=args.zip,
-            city=getattr(args, "city", None),
-            state=getattr(args, "state", None),
-            category=getattr(args, "category", None),
+            city=getattr(args, "city", None) or None,
+            state=getattr(args, "state", None) or None,
+            industry=getattr(args, "category", None) or None,
         )
         disco.close()
     except Exception as e:
@@ -947,7 +946,7 @@ def cmd_discover(args: argparse.Namespace) -> None:
             info(f"  - {name} ({city}, {state})")
         if len(results) > 10:
             info(f"  ... and {len(results) - 10:,} more")
-        info(f"\n  Use --enrich to import and enrich these businesses.")
+        info("\n  Use --enrich to import and enrich these businesses.")
 
 
 # ---------------------------------------------------------------------------
@@ -962,7 +961,7 @@ def cmd_dashboard(args: argparse.Namespace) -> None:
 
     info(f"\n{bold('FORGE')} {dim(f'v{__version__}')} — Dashboard")
     info(f"  Starting dashboard on http://127.0.0.1:{port}")
-    info(f"  Press Ctrl+C to stop.\n")
+    info("  Press Ctrl+C to stop.\n")
 
     try:
         from forge.dashboard.app import app

@@ -2,16 +2,10 @@
 import os
 import csv
 import tempfile
-import pytest
 
 
 def test_forge_imports():
     """Verify all critical modules import."""
-    from forge.db import ForgeDB
-    from forge.config import ForgeConfig
-    from forge.cli import main
-    from forge.adapters.claude import ClaudeAdapter
-    from forge.adapters.ollama import OllamaAdapter
 
 
 def test_forgedb_sqlite_crud():

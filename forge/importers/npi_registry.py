@@ -80,7 +80,7 @@ def query_npi_api(
 
     Returns list of provider dicts with name, phone, address, NPI, taxonomy.
     """
-    params = {
+    params: Dict[str, Any] = {
         "version": "2.1",
         "enumeration_type": "NPI-2",  # Organizations only
         "state": state,
@@ -247,7 +247,7 @@ def import_npi_for_state(
             }, timeout=15.0)
             data = resp.json()
             stats["npi_lookups"] += 1
-        except Exception as e:
+        except Exception:
             stats["errors"] += 1
             time.sleep(1)
             continue
@@ -255,7 +255,6 @@ def import_npi_for_state(
         results = data.get("results", [])
         matched_npi = None
         matched_industry = None
-        match_type = None
 
         for r in results:
             basic = r.get("basic", {})
@@ -273,12 +272,10 @@ def import_npi_for_state(
             # Phone match
             if phone and npi_phone and phone == npi_phone:
                 matched_npi = str(r.get("number", ""))
-                match_type = "phone"
                 stats["phone_matches"] += 1
             # Name match (exact, case-insensitive)
             elif org_name.upper() == name.upper():
                 matched_npi = str(r.get("number", ""))
-                match_type = "name"
                 stats["name_matches"] += 1
 
             if matched_npi:
@@ -307,7 +304,7 @@ def import_npi_for_state(
                 params_list.append(biz["id"])
                 with db.transaction() as tx:
                     tx.execute(query, tuple(params_list))
-            except Exception as e:
+            except Exception:
                 stats["errors"] += 1
 
         # Rate limit: 1 request per 0.3s to be polite

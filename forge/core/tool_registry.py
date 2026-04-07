@@ -12,7 +12,6 @@ Depended on by: agent_loop.py, enrichment workers
 
 from __future__ import annotations
 
-import json
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass

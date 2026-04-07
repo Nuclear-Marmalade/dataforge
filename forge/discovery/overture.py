@@ -191,13 +191,13 @@ class OvertureDiscovery:
 
     def search(
         self,
-        zip_code: str = None,
-        city: str = None,
-        state: str = None,
-        latitude: float = None,
-        longitude: float = None,
+        zip_code: Optional[str] = None,
+        city: Optional[str] = None,
+        state: Optional[str] = None,
+        latitude: Optional[float] = None,
+        longitude: Optional[float] = None,
         radius_miles: float = 10,
-        industry: str = None,
+        industry: Optional[str] = None,
         limit: int = 1000,
     ) -> List[dict]:
         """

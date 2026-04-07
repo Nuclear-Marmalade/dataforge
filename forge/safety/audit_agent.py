@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -213,7 +212,8 @@ class HaikuAuditAgent:
         )
 
         # Parse Haiku's response
-        haiku_text = response.content[0].text
+        first_block = response.content[0]
+        haiku_text = first_block.text if hasattr(first_block, "text") else str(first_block)
         logger.debug("Haiku audit response for %s: %s", business.get("name", "?"), haiku_text[:200])
 
         return self._parse_audit_response(

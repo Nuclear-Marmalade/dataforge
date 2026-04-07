@@ -32,7 +32,7 @@ import os
 import sys
 import traceback
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 # All logging goes to stderr — stdout is the MCP transport
 logging.basicConfig(
@@ -218,7 +218,7 @@ def _tool_forge_discover(arguments: Dict[str, Any]) -> Dict[str, Any]:
         return {"error": f"Invalid ZIP code: '{zip_code}'. Must be a 5-digit US ZIP code."}
 
     try:
-        from forge.discovery.overture import OvertureDiscovery, OvertureDiscoveryError
+        from forge.discovery.overture import OvertureDiscovery  # noqa: F401 - OvertureDiscoveryError removed (unused)
     except ImportError:
         return {
             "error": (
@@ -303,7 +303,7 @@ def _tool_forge_enrich_record(arguments: Dict[str, Any]) -> Dict[str, Any]:
         full_record = db.get_business(business_id)
         if full_record:
             # Convert non-serializable types
-            clean = {}
+            clean: Dict[str, Any] = {}
             for k, v in full_record.items():
                 if v is None:
                     clean[k] = None
@@ -332,7 +332,7 @@ def _tool_forge_stats(arguments: Dict[str, Any]) -> Dict[str, Any]:
     try:
         stats = db.get_stats()
         # Ensure all values are JSON-serializable
-        clean_stats = {}
+        clean_stats: Dict[str, Any] = {}
         for k, v in stats.items():
             if v is None:
                 clean_stats[k] = None
@@ -406,7 +406,7 @@ def _tool_forge_search(arguments: Dict[str, Any]) -> Dict[str, Any]:
         # Clean results for JSON serialization
         clean_results = []
         for row in results:
-            clean = {}
+            clean: Dict[str, Any] = {}
             for k, v in row.items():
                 if v is None:
                     clean[k] = None
@@ -663,9 +663,6 @@ def run_server():
     """
     logger.info("FORGE MCP Server starting...")
     logger.info("Reading JSON-RPC messages from stdin, writing to stdout.")
-
-    # Buffer for reading
-    buffer = b""
 
     while True:
         try:

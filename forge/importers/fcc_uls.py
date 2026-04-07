@@ -15,14 +15,13 @@ Usage:
 
 from __future__ import annotations
 
-import csv
 import json
 import logging
 import os
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("forge.importers.fcc_uls")
 
@@ -66,7 +65,7 @@ def normalize_name(name: str) -> str:
     return name.strip()
 
 
-def parse_en_file(filepath: str) -> List[Dict[str, str]]:
+def parse_en_file(filepath: str) -> List[Dict[str, Any]]:
     """
     Parse an FCC EN.dat pipe-delimited file.
 

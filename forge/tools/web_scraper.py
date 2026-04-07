@@ -238,6 +238,7 @@ class AsyncWebScraper:
         session = await self._get_session()
 
         try:
+            assert self._semaphore is not None
             async with self._semaphore:
                 # Rate limit globally
                 await self._rate_limiter.acquire()

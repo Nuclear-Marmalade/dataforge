@@ -1,8 +1,6 @@
 """Tests for CLI commands."""
-import os
 import subprocess
 import sys
-import pytest
 
 
 class TestCLIHelp:

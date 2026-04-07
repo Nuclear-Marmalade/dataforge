@@ -25,7 +25,7 @@ import socket
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import dns.resolver
@@ -175,8 +175,8 @@ def get_mx_hosts(domain: str) -> Optional[List[str]]:
     mx_hosts: Optional[List[str]] = None
     try:
         answers = dns.resolver.resolve(domain, "MX", lifetime=5.0)
-        records = sorted(answers, key=lambda r: r.preference)
-        mx_hosts = [str(r.exchange).rstrip(".") for r in records]
+        records = sorted(answers, key=lambda r: r.preference)  # type: ignore[attr-defined]
+        mx_hosts = [str(r.exchange).rstrip(".") for r in records]  # type: ignore[attr-defined]
         if not mx_hosts:
             mx_hosts = None
     except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN,
@@ -362,7 +362,7 @@ def save_checkpoint(last_id: str) -> None:
 # Worker function for ThreadPoolExecutor
 # ---------------------------------------------------------------------------
 
-def verify_business(business_id: int, website_url: str) -> Optional[Tuple[int, str]]:
+def verify_business(business_id: str, website_url: str) -> Optional[Tuple[str, str]]:
     """
     Attempt to find a valid email for a single business.
 
@@ -426,9 +426,6 @@ def run(resume: bool = False, limit: Optional[int] = None, workers: int = 5, db_
     total_processed = 0
     total_found = 0
     total_written = 0
-    total_skipped_catchall = 0
-    total_skipped_no_mx = 0
-    total_skipped_no_domain = 0
     start_time = time.time()
     last_checkpoint_count = 0
 

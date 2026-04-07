@@ -1,8 +1,6 @@
 """Tests for MCP server tools and JSON-RPC protocol."""
-import json
 import os
 import uuid
-import pytest
 
 
 class TestMCPToolDefinitions:

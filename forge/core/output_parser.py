@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("forge.output_parser")
@@ -96,7 +96,7 @@ class OutputParser:
 
     def _parse_native_tool_calls(self, response: dict) -> List[ToolCall]:
         """Parse Ollama's native tool call format."""
-        calls = []
+        calls: List[ToolCall] = []
         msg = response.get("message", {})
         if not isinstance(msg, dict):
             return calls
@@ -129,7 +129,7 @@ class OutputParser:
         or:
           {"name": "tool_name", "input": {...}}
         """
-        calls = []
+        calls: List[ToolCall] = []
         # Find all JSON objects in the text
         json_objects = self._extract_json_objects(text)
 
@@ -156,7 +156,7 @@ class OutputParser:
 
     def _parse_code_block_tool_calls(self, text: str) -> List[ToolCall]:
         """Extract tool calls from JSON in markdown code blocks."""
-        calls = []
+        calls: List[ToolCall] = []
         # Match ```json ... ``` or ``` ... ```
         pattern = r"```(?:json)?\s*\n?(.*?)\n?\s*```"
         matches = re.findall(pattern, text, re.DOTALL)

@@ -38,10 +38,9 @@ import json
 import logging
 import time
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from forge.adapters.ollama import OllamaAdapter
 from forge.tools.web_scraper import AsyncWebScraper
 from forge.core.output_parser import extract_json_from_response
 
@@ -254,8 +253,8 @@ class EnrichmentPipeline:
                     break
 
                 url = result.get("url", "")
-                biz = url_biz_map.get(url)
-                if not biz:
+                matched_biz = url_biz_map.get(url)
+                if not matched_biz:
                     continue
 
                 # Check for scrape failures (connection errors, timeouts, etc.)
@@ -264,7 +263,7 @@ class EnrichmentPipeline:
                     with self._lock:
                         self._stats.scrape_failures += 1
                     logger.info("Scrape failed for %s: %s", url[:80], status)
-                    batch_tracking_ids.append(biz["id"])
+                    batch_tracking_ids.append(matched_biz["id"])
                     with self._lock:
                         self._stats.total_processed += 1
                         processed += 1
@@ -301,15 +300,15 @@ class EnrichmentPipeline:
 
                     # Collect for batch write
                     if updates:
-                        batch_enrichments.append((biz["id"], updates))
+                        batch_enrichments.append((matched_biz["id"], updates))
 
                     # Always track enrichment attempt
-                    batch_tracking_ids.append(biz["id"])
+                    batch_tracking_ids.append(matched_biz["id"])
 
                 except Exception as e:
                     with self._lock:
                         self._stats.scrape_failures += 1
-                    logger.debug("Scrape result processing failed for %s: %s", biz.get("name", "?"), e)
+                    logger.debug("Scrape result processing failed for %s: %s", matched_biz.get("name", "?"), e)
 
                 with self._lock:
                     self._stats.total_processed += 1
@@ -408,7 +407,7 @@ class EnrichmentPipeline:
             self._update_enrichment_tracking(business["id"])
             return
 
-        updates = {}
+        updates: Dict[str, Any] = {}
 
         # Validate and extract summary (10-500 chars)
         summary = parsed.get("summary", "")

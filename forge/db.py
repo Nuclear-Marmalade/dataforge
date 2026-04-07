@@ -32,8 +32,7 @@ import sqlite3
 import threading
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
-from typing import Any, Dict, Generator, List, Optional, Tuple
+from typing import Any, Dict, Generator, List, Optional, Tuple, Union
 
 logger = logging.getLogger("forge.db")
 
@@ -360,7 +359,7 @@ class ForgeDB:
             ValueError: If config has neither db_path nor db_host.
         """
         if "db_path" in config:
-            backend = _SQLiteBackend(db_path=config["db_path"])
+            backend: Union[_SQLiteBackend, _PostgresBackend] = _SQLiteBackend(db_path=config["db_path"])
             return cls(backend)
         elif "db_host" in config:
             backend = _PostgresBackend(
@@ -627,7 +626,7 @@ class ForgeDB:
                 # Update timestamps
                 set_clauses.append(f"updated_at = {self.now_expr}")
                 set_clauses.append(f"last_enriched_at = {self.now_expr}")
-                set_clauses.append(f"enrichment_attempts = COALESCE(enrichment_attempts, 0) + 1")
+                set_clauses.append("enrichment_attempts = COALESCE(enrichment_attempts, 0) + 1")
 
                 if self.is_postgres:
                     query = f"UPDATE businesses SET {', '.join(set_clauses)} WHERE id = %s::uuid"
@@ -699,7 +698,7 @@ class ForgeDB:
 
                     set_clauses.append(f"updated_at = {self.now_expr}")
                     set_clauses.append(f"last_enriched_at = {self.now_expr}")
-                    set_clauses.append(f"enrichment_attempts = COALESCE(enrichment_attempts, 0) + 1")
+                    set_clauses.append("enrichment_attempts = COALESCE(enrichment_attempts, 0) + 1")
 
                     if self.is_postgres:
                         query = f"UPDATE businesses SET {', '.join(set_clauses)} WHERE id = %s::uuid"
@@ -937,7 +936,7 @@ class ForgeDB:
         # Keyset pagination
         if resume_id:
             if self.is_postgres:
-                conditions.append(f"id > %s::uuid")
+                conditions.append("id > %s::uuid")
             else:
                 conditions.append("id > ?")
 

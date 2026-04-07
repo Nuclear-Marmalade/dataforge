@@ -60,6 +60,14 @@ Issues = "https://github.com/ghealysr/forge/issues"
 [project.scripts]
 forge = "forge.cli:main"
 
+[tool.mypy]
+python_version = "3.9"
+warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+module = ["psycopg2.*", "duckdb.*", "anthropic.*", "aiohttp.*", "aiolimiter.*", "httpx.*"]
+ignore_missing_imports = true
+
 [tool.setuptools.packages.find]
 include = ["forge*"]
 

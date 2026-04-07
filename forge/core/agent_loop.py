@@ -193,8 +193,8 @@ class AgentLoop:
 
                 for tc in tool_calls:
                     self._tool_call_count += 1
-                    result = self._execute_tool(tc)
-                    self._context.add_tool_result(tc.name, tc.id, result)
+                    tool_result = self._execute_tool(tc)
+                    self._context.add_tool_result(tc.name, tc.id, tool_result)
 
                 # ── Step 7: Notify callback if registered ──
                 if self._on_turn_complete:
