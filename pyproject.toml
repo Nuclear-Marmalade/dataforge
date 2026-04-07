@@ -68,6 +68,31 @@ warn_unused_configs = true
 module = ["psycopg2.*", "duckdb.*", "anthropic.*", "aiohttp.*", "aiolimiter.*", "httpx.*"]
 ignore_missing_imports = true
 
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RUF"]
+
+[tool.coverage.run]
+source = ["forge"]
+omit = ["forge/tests/*", "forge/__main__.py"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 65
+show_missing = true
+skip_covered = false
+
+[tool.pytest.ini_options]
+testpaths = ["forge/tests"]
+addopts = "-v --strict-markers"
+markers = [
+    "unit: fast unit tests",
+    "integration: tests against a real database",
+    "slow: tests over 1 second",
+    "postgres: tests requiring a PostgreSQL backend",
+]
+
 [tool.setuptools.packages.find]
 include = ["forge*"]
 
