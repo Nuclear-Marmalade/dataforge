@@ -67,8 +67,9 @@ exclude = ["build", "dist", ".venv"]
 follow_imports = "silent"
 
 [[tool.mypy.overrides]]
-module = ["psycopg2.*", "duckdb.*", "anthropic.*", "aiohttp.*", "aiolimiter.*", "httpx.*"]
+module = ["psycopg2.*", "duckdb.*", "anthropic.*", "aiohttp.*", "aiolimiter.*", "httpx.*", "_pytest.*", "pytest.*"]
 ignore_missing_imports = true
+follow_imports = "skip"
 
 [tool.ruff]
 target-version = "py310"
