@@ -4,6 +4,8 @@
 
 The open-source alternative to Apollo, ZoomInfo, and Clearbit. Enriches business databases using free data sources and local AI.
 
+> Coverage is measured with branch coverage enabled (every conditional path counts). 46% branch-aware is roughly equivalent to 67% statement-only on the same 600-test suite.
+
 ```bash
 pip install forge-enrichment
 

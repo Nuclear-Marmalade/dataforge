@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import logging
 import threading
+
+from forge.errors import DatabaseError, TransactionError
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -186,7 +188,7 @@ class ForgeDB(_ForgeDBIOMixin):
                 "business_id": business_id,
                 "fields_updated": list(safe_updates.keys()),
             }
-        except Exception as e:  # Non-critical: return error dict instead of crashing caller
+        except (DatabaseError, Exception) as e:  # Non-critical: return error dict instead of crashing caller
             logger.error("write_enrichment failed for %s: %s", business_id, e)
             return {"status": "error", "business_id": business_id, "error": str(e)}
 
