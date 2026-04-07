@@ -187,6 +187,42 @@ def tail_log(logfile: str, lines: int = 5) -> str:
         return "(no log)"
 
 
+def _check_all_services(current: dict) -> None:
+    """Check each monitored service and restart if down."""
+    for label, svc_info in SERVICES.items():
+        status = check_service_running(label)
+        current["services"][label] = status
+        if status["running"]:
+            logger.info("[OK] %s — PID %s", svc_info["name"], status["pid"])
+        else:
+            logger.warning("[DOWN] %s — exit code %s", svc_info["name"], status.get("exit_code", "unknown"))
+            log_tail = tail_log(svc_info["log"])
+            if log_tail:
+                logger.info("  Last log: %s", log_tail[-200:])
+            logger.info("  Restarting %s...", svc_info["name"])
+            success = restart_service(label, svc_info["plist"])
+            action = f"Restarted {svc_info['name']}: {'SUCCESS' if success else 'FAILED'}"
+            current["actions_taken"].append(action)
+            logger.info("  %s", action)
+
+
+def _log_db_stats(db_stats: dict, previous: dict) -> None:
+    """Log database enrichment stats and compare with previous run."""
+    if "error" in db_stats:
+        logger.error("DB CONNECTION FAILED: %s", db_stats["error"])
+        return
+    logger.info("")
+    logger.info("DB ENRICHMENT STATE:")
+    for key in ("total_records", "with_email", "with_tech_stack", "with_npi", "enriched_today", "last_enriched"):
+        logger.info("  %s: %s", key.replace("_", " ").title(), db_stats.get(key, "?"))
+    prev_email = int(previous.get("db_stats", {}).get("with_email", "0"))
+    curr_email = int(db_stats.get("with_email", "0"))
+    if prev_email > 0:
+        logger.info("  Email delta since last check: +%d", curr_email - prev_email)
+        if curr_email - prev_email == 0:
+            logger.warning("  WARNING: No new emails since last check!")
+
+
 def run_monitor():
     """Main monitoring loop — runs once per invocation."""
     logger.info("=" * 60)
@@ -194,63 +230,14 @@ def run_monitor():
     logger.info("=" * 60)
 
     previous = load_previous_status()
-    current = {
-        "timestamp": datetime.now().isoformat(),
-        "services": {},
-        "db_stats": {},
-        "actions_taken": [],
-    }
+    current = {"timestamp": datetime.now().isoformat(), "services": {}, "db_stats": {}, "actions_taken": []}
 
-    # Check each service
-    for label, info in SERVICES.items():
-        status = check_service_running(label)
-        current["services"][label] = status
-
-        if status["running"]:
-            logger.info("[OK] %s — PID %s", info["name"], status["pid"])
-        else:
-            logger.warning("[DOWN] %s — exit code %s", info["name"], status.get("exit_code", "unknown"))
-
-            # Check log for error details
-            log_tail = tail_log(info["log"])
-            if log_tail:
-                logger.info("  Last log: %s", log_tail[-200:])
-
-            # Auto-restart
-            logger.info("  Restarting %s...", info["name"])
-            success = restart_service(label, info["plist"])
-            action = f"Restarted {info['name']}: {'SUCCESS' if success else 'FAILED'}"
-            current["actions_taken"].append(action)
-            logger.info("  %s", action)
-
-    # Check DB progress
+    _check_all_services(current)
     db_stats = get_db_stats()
     current["db_stats"] = db_stats
+    _log_db_stats(db_stats, previous)
 
-    if "error" not in db_stats:
-        logger.info("")
-        logger.info("DB ENRICHMENT STATE:")
-        logger.info("  Total records:  %s", db_stats.get("total_records", "?"))
-        logger.info("  With email:     %s", db_stats.get("with_email", "?"))
-        logger.info("  With tech_stack: %s", db_stats.get("with_tech_stack", "?"))
-        logger.info("  With NPI:       %s", db_stats.get("with_npi", "?"))
-        logger.info("  Enriched today: %s", db_stats.get("enriched_today", "?"))
-        logger.info("  Last enriched:  %s", db_stats.get("last_enriched", "?"))
-
-        # Compare with previous run
-        prev_email = int(previous.get("db_stats", {}).get("with_email", "0"))
-        curr_email = int(db_stats.get("with_email", "0"))
-        delta = curr_email - prev_email
-        if prev_email > 0:
-            logger.info("  Email delta since last check: +%d", delta)
-            if delta == 0:
-                logger.warning("  WARNING: No new emails since last check!")
-    else:
-        logger.error("DB CONNECTION FAILED: %s", db_stats["error"])
-
-    # Save status
     save_status(current)
-
     logger.info("")
     if current["actions_taken"]:
         logger.info("ACTIONS TAKEN: %s", "; ".join(current["actions_taken"]))

@@ -224,32 +224,126 @@ def _flush_updates(db, update_batch: List[tuple], stats: Dict[str, int]) -> None
         logger.error("Batch flush failed: %s", e)
 
 
+def _parse_all_en_files(data_dir: str) -> List[Dict]:
+    """Parse all FCC EN.dat files from a directory tree."""
+    logger.info("Parsing FCC EN.dat files from %s", data_dir)
+    all_records: List[Dict] = []
+    data_path = Path(data_dir)
+    for en_file in data_path.rglob("EN.dat"):
+        logger.info("Parsing %s", en_file)
+        records = parse_en_file(str(en_file))
+        all_records.extend(records)
+        logger.info("  -> %d business records with email", len(records))
+    logger.info("Total FCC records with email: %d", len(all_records))
+    return all_records
+
+
+def _match_row_to_indexes(
+    row: Dict,
+    phone_index: Dict[str, Dict],
+    name_index: Dict[str, Dict],
+    update_batch: List[tuple],
+) -> None:
+    """Match a single business row against FCC phone and name indexes."""
+    biz_phone = normalize_phone(row["phone"] or "")
+    biz_name_norm = normalize_name(row["name"] or "")
+    biz_state = (row["state"] or "").upper()
+
+    matched_email = None
+    match_type = None
+
+    if biz_phone and biz_phone in phone_index:
+        matched_email = phone_index[biz_phone]["email"]
+        match_type = "phone"
+
+    if not matched_email:
+        key = f"{biz_name_norm}|{biz_state}"
+        if key in name_index:
+            matched_email = name_index[key]["email"]
+            match_type = "name_state"
+
+    if matched_email:
+        update_batch.append((
+            matched_email,
+            f"fcc_uls_{match_type}",
+            str(row["id"]),
+            match_type,
+        ))
+
+
+def _fetch_unenriched_page(db, last_id: Optional[str], fetch_size: int, ph: str, uuid_cast: str) -> list:
+    """Fetch a page of businesses without email for FCC matching."""
+    if last_id is None:
+        return db.fetch_dicts(
+            f"SELECT id, name, phone, city, state FROM businesses "
+            f"WHERE (email IS NULL OR email = '') ORDER BY id LIMIT {ph}",
+            (fetch_size,),
+        )
+    return db.fetch_dicts(
+        f"SELECT id, name, phone, city, state FROM businesses "
+        f"WHERE id > {uuid_cast} AND (email IS NULL OR email = '') ORDER BY id LIMIT {ph}",
+        (last_id, fetch_size),
+    )
+
+
+def _scan_and_match(
+    db, phone_index: Dict[str, Dict], name_index: Dict[str, Dict],
+    stats: Dict[str, int], last_id: Optional[str], total_checked: int,
+) -> None:
+    """Scan businesses via keyset pagination and match against FCC indexes."""
+    fetch_size = 5000
+    update_batch: List[tuple] = []
+    consecutive_errors = 0
+    ph = "%s" if db.is_postgres else "?"
+    uuid_cast = f"{ph}::uuid" if db.is_postgres else ph
+
+    while True:
+        try:
+            rows = _fetch_unenriched_page(db, last_id, fetch_size, ph, uuid_cast)
+            if not rows:
+                break
+            consecutive_errors = 0
+            last_id = rows[-1]["id"]
+            total_checked += len(rows)
+            for row in rows:
+                _match_row_to_indexes(row, phone_index, name_index, update_batch)
+            if len(update_batch) >= 500:
+                _flush_updates(db, update_batch, stats)
+                update_batch = []
+            if total_checked % 50000 == 0:
+                _save_checkpoint(str(last_id), total_checked, stats)
+                logger.info("Progress: checked %d, matched %d", total_checked, stats["emails_written"])
+        except Exception as e:
+            consecutive_errors += 1
+            logger.error("DB error (attempt %d/10): %s", consecutive_errors, e)
+            if consecutive_errors >= 10:
+                _save_checkpoint(str(last_id) if last_id else "", total_checked, stats)
+                raise
+            if last_id:
+                _save_checkpoint(str(last_id), total_checked, stats)
+            time.sleep(min(2 ** consecutive_errors * 5, 120))
+
+    if update_batch:
+        _flush_updates(db, update_batch, stats)
+
+
 def import_fcc_to_db(
     data_dir: str,
     db_path: Optional[str] = None,
     batch_size: int = 500,
     resume: bool = False,
 ) -> Dict[str, int]:
-    """
-    Import FCC ULS email data into the businesses table.
-    Supports resume from checkpoint.
-
-    Uses ForgeDB, supporting both SQLite (via --db-path) and PostgreSQL (via env vars).
+    """Import FCC ULS email data into the businesses table.
 
     Returns dict with match statistics.
     """
     db = _get_forgedb(db_path)
 
     stats = {
-        "fcc_records_parsed": 0,
-        "phone_matches": 0,
-        "name_matches": 0,
-        "emails_written": 0,
-        "already_had_email": 0,
-        "errors": 0,
+        "fcc_records_parsed": 0, "phone_matches": 0, "name_matches": 0,
+        "emails_written": 0, "already_had_email": 0, "errors": 0,
     }
 
-    # Check for resume checkpoint
     last_id = None
     total_checked = 0
     if resume:
@@ -261,136 +355,25 @@ def import_fcc_to_db(
             logger.info("Resuming from checkpoint: last_id=%s, checked=%d, emails=%d",
                         last_id, total_checked, stats["emails_written"])
 
-    # Parse all EN.dat files
-    logger.info("Parsing FCC EN.dat files from %s", data_dir)
-    all_records = []
-    data_path = Path(data_dir)
-
-    for en_file in data_path.rglob("EN.dat"):
-        logger.info("Parsing %s", en_file)
-        records = parse_en_file(str(en_file))
-        all_records.extend(records)
-        logger.info("  -> %d business records with email", len(records))
-
+    all_records = _parse_all_en_files(data_dir)
     stats["fcc_records_parsed"] = len(all_records)
-    logger.info("Total FCC records with email: %d", len(all_records))
-
     if not all_records:
         logger.warning("No FCC records found")
         return stats
 
-    # Build indexes
     phone_index = build_phone_index(all_records)
     name_index = build_name_state_index(all_records)
     logger.info("Phone index: %d entries, Name+State index: %d entries",
                 len(phone_index), len(name_index))
 
-    # Keyset pagination with checkpoint
-    fetch_size = 5000
-    update_batch: List[tuple] = []
-    update_batch_size = 500
-    consecutive_errors = 0
-    max_consecutive_errors = 10
-    ph = "%s" if db.is_postgres else "?"
-    uuid_cast = f"{ph}::uuid" if db.is_postgres else ph
+    _scan_and_match(db, phone_index, name_index, stats, last_id, total_checked)
 
-    while True:
-        try:
-            if last_id is None:
-                rows = db.fetch_dicts(
-                    f"SELECT id, name, phone, city, state FROM businesses "
-                    f"WHERE (email IS NULL OR email = '') ORDER BY id LIMIT {ph}",
-                    (fetch_size,),
-                )
-            else:
-                rows = db.fetch_dicts(
-                    f"SELECT id, name, phone, city, state FROM businesses "
-                    f"WHERE id > {uuid_cast} AND (email IS NULL OR email = '') "
-                    f"ORDER BY id LIMIT {ph}",
-                    (last_id, fetch_size),
-                )
-
-            if not rows:
-                break
-
-            consecutive_errors = 0
-            last_id = rows[-1]["id"]
-            total_checked += len(rows)
-
-            # Match each row against indexes (in-memory, fast)
-            for row in rows:
-                biz_phone = normalize_phone(row["phone"] or "")
-                biz_name_norm = normalize_name(row["name"] or "")
-                biz_state = (row["state"] or "").upper()
-
-                matched_email = None
-                match_type = None
-
-                # Match 1: Phone number (highest confidence)
-                if biz_phone and biz_phone in phone_index:
-                    matched_email = phone_index[biz_phone]["email"]
-                    match_type = "phone"
-
-                # Match 2: Name + State (medium confidence)
-                if not matched_email:
-                    key = f"{biz_name_norm}|{biz_state}"
-                    if key in name_index:
-                        matched_email = name_index[key]["email"]
-                        match_type = "name_state"
-
-                if matched_email:
-                    update_batch.append((
-                        matched_email,
-                        f"fcc_uls_{match_type}",
-                        str(row["id"]),
-                        match_type,
-                    ))
-
-            # Flush updates in batches
-            if len(update_batch) >= update_batch_size:
-                _flush_updates(db, update_batch, stats)
-                update_batch = []
-
-            # Save checkpoint every 50K records
-            if total_checked % 50000 == 0:
-                _save_checkpoint(str(last_id), total_checked, stats)
-                logger.info(
-                    "Progress: checked %d businesses, matched %d emails (phone=%d, name=%d)",
-                    total_checked, stats["emails_written"],
-                    stats["phone_matches"], stats["name_matches"],
-                )
-
-        except Exception as e:
-            consecutive_errors += 1
-            logger.error("DB error (attempt %d/%d): %s",
-                         consecutive_errors, max_consecutive_errors, e)
-
-            if consecutive_errors >= max_consecutive_errors:
-                logger.critical("Too many consecutive DB errors, saving checkpoint and exiting")
-                _save_checkpoint(str(last_id) if last_id else "", total_checked, stats)
-                raise
-
-            # Save checkpoint before retry
-            if last_id:
-                _save_checkpoint(str(last_id), total_checked, stats)
-
-            # Backoff before retry
-            wait = min(2 ** consecutive_errors * 5, 120)
-            logger.info("Retrying in %ds...", wait)
-            time.sleep(wait)
-
-    # Flush remaining updates
-    if update_batch:
-        _flush_updates(db, update_batch, stats)
-
-    # Clean up checkpoint on successful completion
     try:
         os.remove(CHECKPOINT_FILE)
     except FileNotFoundError:
         pass
 
     db.close()
-
     logger.info("FCC ULS import complete: %s", json.dumps(stats, indent=2))
     return stats
 

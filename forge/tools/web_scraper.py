@@ -213,140 +213,110 @@ class AsyncWebScraper:
         if self._session and not self._session.closed:
             await self._session.close()
 
-    async def scrape_one(self, url: str) -> Dict[str, Any]:
-        """
-        Scrape a single business website for enrichment data.
+    async def _extract_all_data(self, html: str, headers: Dict[str, str], resp_url: str, session: aiohttp.ClientSession, domain: str) -> Dict[str, Any]:
+        """Extract tech stack, CMS, and emails from a fetched page."""
+        data: Dict[str, Any] = {}
 
-        Returns dict with: emails, tech_stack, cms_detected, ssl_valid,
-        site_speed_ms, status, status_code.
-        """
-        # Normalize URL
+        tech = self._detect_tech(html, headers)
+        data["tech_stack"] = tech
+
+        for cms in _CMS_PRIORITY:
+            if cms in tech:
+                data["cms_detected"] = cms
+                break
+
+        emails: Set[str] = set()
+        emails.update(self._extract_mailto(html))
+        emails.update(self._extract_emails(html))
+
+        if not emails:
+            base = f"{urlparse(resp_url).scheme}://{urlparse(resp_url).hostname}"
+            contact_emails = await self._crawl_contact_pages(session, base, domain)
+            emails.update(contact_emails)
+
+        emails.update(self._extract_jsonld_emails(html))
+        emails.update(self._decode_obfuscated_emails(html))
+        emails.update(self._extract_footer_emails(html))
+
+        data["emails"] = sorted(emails)
+        return data
+
+    async def _handle_ssl_fallback(self, session: aiohttp.ClientSession, url: str, start_time: float, result: Dict[str, Any]) -> None:
+        """Retry a failed SSL request over plain HTTP."""
+        result["ssl_valid"] = False
+        try:
+            async with session.get(
+                url.replace("https://", "http://"),
+                allow_redirects=True,
+                max_redirects=3,
+            ) as resp:
+                ttfb_ms = int((time.monotonic() - start_time) * 1000)
+                result["site_speed_ms"] = ttfb_ms
+                result["status_code"] = resp.status
+                if resp.status == 200:
+                    body = await resp.content.read(_MAX_BODY_SIZE)
+                    html = body.decode("utf-8", errors="replace")
+                    headers = dict(resp.headers)
+                    result["status"] = "ok_no_ssl"
+                    result["tech_stack"] = self._detect_tech(html, headers)
+                    for cms in _CMS_PRIORITY:
+                        if cms in result["tech_stack"]:
+                            result["cms_detected"] = cms
+                            break
+                    result["emails"] = sorted(self._extract_emails(html))
+                else:
+                    result["status"] = f"http_{resp.status}"
+        except Exception:
+            result["status"] = "ssl_and_http_failed"
+
+    async def _fetch_and_extract(self, session: aiohttp.ClientSession, url: str, domain: str, result: Dict[str, Any]) -> None:
+        """Fetch a URL and extract enrichment data into result dict."""
+        start_time = time.monotonic()
+        try:
+            async with session.get(url, allow_redirects=True, max_redirects=3, ssl=True) as resp:
+                result["site_speed_ms"] = int((time.monotonic() - start_time) * 1000)
+                result["status_code"] = resp.status
+                result["ssl_valid"] = url.startswith("https://")
+
+                if resp.status != 200:
+                    result["status"] = f"http_{resp.status}"
+                    return
+
+                body = await resp.content.read(_MAX_BODY_SIZE)
+                html = body.decode("utf-8", errors="replace")
+                result["status"] = "ok"
+                extracted = await self._extract_all_data(html, dict(resp.headers), str(resp.url), session, domain)
+                result.update(extracted)
+
+        except aiohttp.ClientSSLError:
+            await self._handle_ssl_fallback(session, url, start_time, result)
+        except aiohttp.ClientConnectorError:
+            result["status"] = "connection_failed"
+        except asyncio.TimeoutError:
+            result["status"] = "timeout"
+        except aiohttp.TooManyRedirects:
+            result["status"] = "too_many_redirects"
+        except aiohttp.ClientResponseError as e:
+            result["status"] = f"response_error_{e.status}"
+
+    async def scrape_one(self, url: str) -> Dict[str, Any]:
+        """Scrape a single business website for enrichment data."""
         if not url.startswith("http"):
             url = f"https://{url}"
 
         result: Dict[str, Any] = {
-            "url": url,
-            "status": "unknown",
-            "emails": [],
-            "tech_stack": [],
-            "cms_detected": None,
-            "ssl_valid": None,
-            "site_speed_ms": None,
-            "status_code": None,
+            "url": url, "status": "unknown", "emails": [], "tech_stack": [],
+            "cms_detected": None, "ssl_valid": None, "site_speed_ms": None, "status_code": None,
         }
 
         session = await self._get_session()
-
         try:
             assert self._semaphore is not None
             async with self._semaphore:
-                # Rate limit globally
                 await self._rate_limiter.acquire()
-
-                # Per-domain rate limiting (200ms minimum)
                 domain = urlparse(url).hostname or ""
                 await self._domain_rate_limit(domain)
-
-                # Fetch main page with timing
-                start_time = time.monotonic()
-                try:
-                    async with session.get(
-                        url,
-                        allow_redirects=True,
-                        max_redirects=3,
-                        ssl=True,
-                    ) as resp:
-                        ttfb_ms = int((time.monotonic() - start_time) * 1000)
-                        result["site_speed_ms"] = ttfb_ms
-                        result["status_code"] = resp.status
-                        result["ssl_valid"] = url.startswith("https://")
-
-                        if resp.status != 200:
-                            result["status"] = f"http_{resp.status}"
-                            return result
-
-                        # Read body with size limit
-                        body = await resp.content.read(_MAX_BODY_SIZE)
-                        html = body.decode("utf-8", errors="replace")
-                        headers = dict(resp.headers)
-
-                        result["status"] = "ok"
-
-                        # Detect tech stack from same response
-                        tech = self._detect_tech(html, headers)
-                        result["tech_stack"] = tech
-
-                        # Detect primary CMS
-                        for cms in _CMS_PRIORITY:
-                            if cms in tech:
-                                result["cms_detected"] = cms
-                                break
-
-                        # Multi-layer email extraction
-                        emails: Set[str] = set()
-
-                        # Layer 1: mailto links
-                        emails.update(self._extract_mailto(html))
-
-                        # Layer 2: regex scan + CF decode
-                        emails.update(self._extract_emails(html))
-
-                        # Layer 3: contact page crawl (only if no emails yet)
-                        if not emails:
-                            base = f"{urlparse(str(resp.url)).scheme}://{urlparse(str(resp.url)).hostname}"
-                            contact_emails = await self._crawl_contact_pages(
-                                session, base, domain
-                            )
-                            emails.update(contact_emails)
-
-                        # Layer 4: JSON-LD schema.org structured data
-                        emails.update(self._extract_jsonld_emails(html))
-
-                        # Layer 5: HTML entity / obfuscation decoding
-                        emails.update(self._decode_obfuscated_emails(html))
-
-                        # Layer 6: Footer-specific extraction
-                        emails.update(self._extract_footer_emails(html))
-
-                        result["emails"] = sorted(emails)
-
-                except aiohttp.ClientSSLError:
-                    # Retry without SSL verification
-                    result["ssl_valid"] = False
-                    try:
-                        async with session.get(
-                            url.replace("https://", "http://"),
-                            allow_redirects=True,
-                            max_redirects=3,
-                        ) as resp:
-                            ttfb_ms = int((time.monotonic() - start_time) * 1000)
-                            result["site_speed_ms"] = ttfb_ms
-                            result["status_code"] = resp.status
-                            if resp.status == 200:
-                                body = await resp.content.read(_MAX_BODY_SIZE)
-                                html = body.decode("utf-8", errors="replace")
-                                headers = dict(resp.headers)
-                                result["status"] = "ok_no_ssl"
-                                result["tech_stack"] = self._detect_tech(html, headers)
-                                for cms in _CMS_PRIORITY:
-                                    if cms in result["tech_stack"]:
-                                        result["cms_detected"] = cms
-                                        break
-                                result["emails"] = sorted(self._extract_emails(html))
-                            else:
-                                result["status"] = f"http_{resp.status}"
-                    except Exception:
-                        result["status"] = "ssl_and_http_failed"
-
-                except aiohttp.ClientConnectorError:
-                    result["status"] = "connection_failed"
-                except asyncio.TimeoutError:
-                    result["status"] = "timeout"
-                except aiohttp.TooManyRedirects:
-                    result["status"] = "too_many_redirects"
-                except aiohttp.ClientResponseError as e:
-                    result["status"] = f"response_error_{e.status}"
-
+                await self._fetch_and_extract(session, url, domain, result)
         except Exception as e:
             result["status"] = "error"
             result["error"] = str(e)[:200]

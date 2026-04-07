@@ -45,6 +45,24 @@ class OllamaAdapter:
         self._default_timeout = default_timeout
         self._client = httpx.Client(timeout=default_timeout)
 
+    def _build_chat_payload(self, messages: List[Dict[str, Any]], model: str,
+                            tools: Optional[List[Dict[str, Any]]], temperature: float) -> Dict[str, Any]:
+        """Build the Ollama chat API payload."""
+        payload: Dict[str, Any] = {
+            "model": model, "messages": messages, "stream": False,
+            "options": {"temperature": temperature, "num_predict": 2048},
+        }
+        if tools:
+            payload["tools"] = tools
+        return payload
+
+    def _log_inference_stats(self, data: Dict[str, Any], model: str) -> None:
+        """Log inference speed stats from Ollama response."""
+        eval_count = data.get("eval_count", 0)
+        eval_duration = data.get("eval_duration", 1)
+        tokens_per_sec = eval_count / (eval_duration / 1e9) if eval_duration > 0 else 0
+        logger.debug("Ollama response: model=%s, tokens=%d, tok/s=%.1f", model, eval_count, tokens_per_sec)
+
     def generate(
         self,
         messages: List[Dict[str, Any]],
@@ -54,56 +72,21 @@ class OllamaAdapter:
         temperature: float = 0.3,
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        """
-        Send a chat completion request to Ollama.
-
-        Args:
-            messages: List of message dicts (role + content).
-            model: Model name (defaults to gemma4).
-            tools: List of tool definitions for function calling.
-            timeout: Request timeout in seconds.
-            temperature: Sampling temperature (lower = more deterministic).
+        """Send a chat completion request to Ollama.
 
         Returns:
-            Dict with the model's response including message content
-            and any tool calls.
+            Dict with the model's response including message content and any tool calls.
         """
         model = model or self._default_model
         timeout = timeout or self._default_timeout
-
-        payload: Dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "stream": False,
-            "options": {
-                "temperature": temperature,
-                "num_predict": 2048,  # Max output tokens
-            },
-        }
-
-        if tools:
-            payload["tools"] = tools
+        payload = self._build_chat_payload(messages, model, tools, temperature)
 
         try:
-            response = self._client.post(
-                f"{self._base_url}/api/chat",
-                json=payload,
-                timeout=timeout,
-            )
+            response = self._client.post(f"{self._base_url}/api/chat", json=payload, timeout=timeout)
             response.raise_for_status()
             data = response.json()
-
-            # Log inference stats
-            eval_count = data.get("eval_count", 0)
-            eval_duration = data.get("eval_duration", 1)
-            tokens_per_sec = eval_count / (eval_duration / 1e9) if eval_duration > 0 else 0
-            logger.debug(
-                "Ollama response: model=%s, tokens=%d, tok/s=%.1f",
-                model, eval_count, tokens_per_sec,
-            )
-
+            self._log_inference_stats(data, model)
             return data
-
         except httpx.TimeoutException:
             logger.error("Ollama timeout after %.0fs for model %s", timeout, model)
             raise TimeoutError(f"Ollama timed out after {timeout}s")

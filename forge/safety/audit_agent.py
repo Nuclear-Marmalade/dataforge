@@ -135,14 +135,27 @@ class HaikuAuditAgent:
         self._enrichment_count += 1
         return self._enrichment_count % self._audit_interval == 0
 
+    def _process_audit_result(self, result: AuditResult) -> None:
+        """Update stats and log a single audit result."""
+        self._audit_log.append(result)
+        self._stats.total_audited += 1
+        if result.passed:
+            self._stats.total_passed += 1
+        else:
+            self._stats.total_failed += 1
+            for issue in result.issues:
+                self._stats.issues_by_type[issue] = self._stats.issues_by_type.get(issue, 0) + 1
+        self._log_audit_result(result)
+
+    def _check_failure_threshold(self) -> None:
+        """Pause enrichment if failure rate exceeds threshold."""
+        if self._stats.failure_rate > FAILURE_THRESHOLD and self._stats.total_audited >= 10:
+            self._paused = True
+            logger.critical("AUDIT ALERT: Failure rate %.1f%% exceeds threshold %.1f%%. Enrichment PAUSED.",
+                            self._stats.failure_rate * 100, FAILURE_THRESHOLD * 100)
+
     def run_audit(self, state_filter: Optional[str] = None) -> List[AuditResult]:
-        """
-        Sample recently enriched records and validate with Haiku.
-
-        Requires PostgreSQL backend.
-
-        Returns list of AuditResult objects.
-        """
+        """Sample recently enriched records and validate with Haiku."""
         try:
             import psycopg2  # noqa: F401
         except ImportError:
@@ -153,7 +166,6 @@ class HaikuAuditAgent:
             logger.warning("Audit agent is paused due to high failure rate")
             return []
 
-        # Fetch recently enriched records
         samples = self._fetch_recent_enrichments(state_filter)
         if not samples:
             logger.info("No recently enriched records to audit")
@@ -164,35 +176,11 @@ class HaikuAuditAgent:
             try:
                 result = self._audit_one(biz)
                 results.append(result)
-                self._audit_log.append(result)
-
-                # Update stats
-                self._stats.total_audited += 1
-                if result.passed:
-                    self._stats.total_passed += 1
-                else:
-                    self._stats.total_failed += 1
-                    for issue in result.issues:
-                        self._stats.issues_by_type[issue] = (
-                            self._stats.issues_by_type.get(issue, 0) + 1
-                        )
-
-                # Log to DB
-                self._log_audit_result(result)
-
+                self._process_audit_result(result)
             except Exception as e:
                 logger.error("Audit failed for %s: %s", biz.get("name", "?"), e)
 
-        # Check failure threshold
-        if self._stats.failure_rate > FAILURE_THRESHOLD and self._stats.total_audited >= 10:
-            self._paused = True
-            logger.critical(
-                "AUDIT ALERT: Failure rate %.1f%% exceeds threshold %.1f%%. "
-                "Enrichment PAUSED. Review audit log.",
-                self._stats.failure_rate * 100,
-                FAILURE_THRESHOLD * 100,
-            )
-
+        self._check_failure_threshold()
         logger.info("Audit complete: %s", self._stats.summary())
         return results
 

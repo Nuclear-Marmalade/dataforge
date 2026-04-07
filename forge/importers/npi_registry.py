@@ -69,24 +69,42 @@ def classify_taxonomy(taxonomy_desc: Optional[str]) -> Optional[str]:
     return None
 
 
-def query_npi_api(
-    state: str,
-    taxonomy: str = "",
-    skip: int = 0,
-    limit: int = 200,
-) -> List[Dict]:
-    """
-    Query the NPI Registry API for providers in a state.
+def _parse_npi_result(r: Dict) -> Dict:
+    """Parse a single NPI API result into a provider dict."""
+    basic = r.get("basic", {})
+    addresses = r.get("addresses", [])
+    taxonomies = r.get("taxonomies", [])
 
-    Returns list of provider dicts with name, phone, address, NPI, taxonomy.
-    """
-    params: Dict[str, Any] = {
-        "version": "2.1",
-        "enumeration_type": "NPI-2",  # Organizations only
-        "state": state,
-        "limit": limit,
-        "skip": skip,
+    practice_addr = None
+    for addr in addresses:
+        if addr.get("address_purpose") == "LOCATION":
+            practice_addr = addr
+            break
+    if not practice_addr and addresses:
+        practice_addr = addresses[0]
+
+    primary_tax = ""
+    for tax in taxonomies:
+        if tax.get("primary"):
+            primary_tax = tax.get("desc", "")
+            break
+
+    phone = normalize_phone((practice_addr or {}).get("telephone_number", "")) if practice_addr else None
+    return {
+        "npi": str(r.get("number", "")),
+        "org_name": basic.get("organization_name", ""),
+        "phone": phone,
+        "city": (practice_addr or {}).get("city", "").upper(),
+        "state": (practice_addr or {}).get("state", "").upper(),
+        "zip": (practice_addr or {}).get("postal_code", "")[:5],
+        "taxonomy": primary_tax,
+        "industry": classify_taxonomy(primary_tax),
     }
+
+
+def query_npi_api(state: str, taxonomy: str = "", skip: int = 0, limit: int = 200) -> List[Dict]:
+    """Query the NPI Registry API for providers in a state."""
+    params: Dict[str, Any] = {"version": "2.1", "enumeration_type": "NPI-2", "state": state, "limit": limit, "skip": skip}
     if taxonomy:
         params["taxonomy_description"] = taxonomy
 
@@ -94,46 +112,7 @@ def query_npi_api(
         resp = httpx.get(NPI_API_URL, params=params, timeout=30.0)
         resp.raise_for_status()
         data = resp.json()
-
-        results = []
-        for r in data.get("results", []):
-            basic = r.get("basic", {})
-            addresses = r.get("addresses", [])
-            taxonomies = r.get("taxonomies", [])
-
-            # Get practice location address (location_address vs mailing)
-            practice_addr = None
-            for addr in addresses:
-                if addr.get("address_purpose") == "LOCATION":
-                    practice_addr = addr
-                    break
-            if not practice_addr and addresses:
-                practice_addr = addresses[0]
-
-            # Get primary taxonomy
-            primary_tax = ""
-            for tax in taxonomies:
-                if tax.get("primary"):
-                    primary_tax = tax.get("desc", "")
-                    break
-
-            phone = None
-            if practice_addr:
-                phone = normalize_phone(practice_addr.get("telephone_number", ""))
-
-            results.append({
-                "npi": str(r.get("number", "")),
-                "org_name": basic.get("organization_name", ""),
-                "phone": phone,
-                "city": (practice_addr or {}).get("city", "").upper(),
-                "state": (practice_addr or {}).get("state", "").upper(),
-                "zip": (practice_addr or {}).get("postal_code", "")[:5],
-                "taxonomy": primary_tax,
-                "industry": classify_taxonomy(primary_tax),
-            })
-
-        return results
-
+        return [_parse_npi_result(r) for r in data.get("results", [])]
     except Exception as e:
         logger.warning("NPI API error for state=%s, skip=%d: %s", state, skip, e)
         return []
@@ -167,34 +146,8 @@ def _get_forgedb(db_path=None):
     return db
 
 
-def import_npi_for_state(
-    state: str,
-    db_path: Optional[str] = None,
-) -> Dict[str, int]:
-    """
-    Import NPI data for a single state.
-
-    Uses ForgeDB, supporting both SQLite (via db_path) and PostgreSQL (via env vars).
-
-    Strategy: Pull OUR healthcare businesses from DB, then look each up in
-    the NPI API by phone or name. This is more efficient than iterating the
-    entire NPI registry.
-    """
-    db = _get_forgedb(db_path)
-    ph = "%s" if db.is_postgres else "?"
-
-    stats = {
-        "our_healthcare_businesses": 0,
-        "npi_lookups": 0,
-        "phone_matches": 0,
-        "name_matches": 0,
-        "npi_written": 0,
-        "industry_written": 0,
-        "errors": 0,
-    }
-
-    # Fetch our healthcare businesses that don't have NPI yet
-    # Use LIKE patterns that work on both SQLite and PostgreSQL
+def _fetch_healthcare_businesses(db, state: str, ph: str) -> List[Dict]:
+    """Fetch healthcare businesses needing NPI enrichment for a state."""
     healthcare_keywords = [
         '%dent%', '%chiropract%', '%veterinar%', '%doctor%',
         '%medical%', '%health%', '%clinic%', '%therap%',
@@ -202,7 +155,7 @@ def import_npi_for_state(
     ]
 
     if db.is_postgres:
-        businesses = db.fetch_dicts(
+        return db.fetch_dicts(
             f"SELECT id, name, phone, city, state, sub_industry "
             f"FROM businesses "
             f"WHERE state = {ph} "
@@ -212,102 +165,133 @@ def import_npi_for_state(
             f"LIMIT 5000",
             (state, *healthcare_keywords),
         )
-    else:
-        # SQLite: chain LIKE clauses with OR
-        like_clauses = " OR ".join([f"sub_industry LIKE {ph}" for _ in healthcare_keywords])
-        businesses = db.fetch_dicts(
-            f"SELECT id, name, phone, city, state, sub_industry "
-            f"FROM businesses "
-            f"WHERE state = {ph} "
-            f"AND (npi_number IS NULL OR npi_number = '') "
-            f"AND sub_industry IS NOT NULL "
-            f"AND ({like_clauses}) "
-            f"LIMIT 5000",
-            (state, *healthcare_keywords),
-        )
 
+    like_clauses = " OR ".join([f"sub_industry LIKE {ph}" for _ in healthcare_keywords])
+    return db.fetch_dicts(
+        f"SELECT id, name, phone, city, state, sub_industry "
+        f"FROM businesses "
+        f"WHERE state = {ph} "
+        f"AND (npi_number IS NULL OR npi_number = '') "
+        f"AND sub_industry IS NOT NULL "
+        f"AND ({like_clauses}) "
+        f"LIMIT 5000",
+        (state, *healthcare_keywords),
+    )
+
+
+def _lookup_npi(name: str, state: str) -> Optional[Dict]:
+    """Perform a single NPI API lookup by organization name + state.
+
+    Returns the parsed JSON response or None on failure.
+    """
+    try:
+        resp = httpx.get(NPI_API_URL, params={
+            "version": "2.1",
+            "enumeration_type": "NPI-2",
+            "organization_name": name,
+            "state": state,
+            "limit": 5,
+        }, timeout=15.0)
+        return resp.json()
+    except Exception:
+        return None
+
+
+def _match_npi_results(results: List[Dict], phone: Optional[str], name: str, stats: Dict[str, int]) -> tuple:
+    """Match NPI API results against a business by phone or name.
+
+    Returns (matched_npi, matched_industry) or (None, None).
+    """
+    for r in results:
+        basic = r.get("basic", {})
+        org_name = basic.get("organization_name", "")
+        addresses = r.get("addresses", [])
+        taxonomies = r.get("taxonomies", [])
+
+        npi_phone = None
+        for addr in addresses:
+            if addr.get("address_purpose") == "LOCATION":
+                npi_phone = normalize_phone(addr.get("telephone_number", ""))
+                break
+
+        matched_npi = None
+        if phone and npi_phone and phone == npi_phone:
+            matched_npi = str(r.get("number", ""))
+            stats["phone_matches"] += 1
+        elif org_name.upper() == name.upper():
+            matched_npi = str(r.get("number", ""))
+            stats["name_matches"] += 1
+
+        if matched_npi:
+            matched_industry = None
+            for tax in taxonomies:
+                if tax.get("primary"):
+                    matched_industry = classify_taxonomy(tax.get("desc", ""))
+                    break
+            return matched_npi, matched_industry
+
+    return None, None
+
+
+def _write_npi_match(db, biz_id: str, matched_npi: str, matched_industry: Optional[str], stats: Dict[str, int], ph: str) -> None:
+    """Write matched NPI data to the database."""
+    try:
+        now_expr = "NOW()" if db.is_postgres else "datetime('now')"
+        uuid_cast = f"{ph}::uuid" if db.is_postgres else ph
+        updates = [f"npi_number = COALESCE(npi_number, {ph})"]
+        params_list: List[Any] = [matched_npi]
+        stats["npi_written"] += 1
+
+        if matched_industry:
+            updates.append(f"industry = COALESCE(industry, {ph})")
+            params_list.append(matched_industry)
+            stats["industry_written"] += 1
+
+        updates.append(f"updated_at = {now_expr}")
+        query = f"UPDATE businesses SET {', '.join(updates)} WHERE id = {uuid_cast}"
+        params_list.append(biz_id)
+        with db.transaction() as tx:
+            tx.execute(query, tuple(params_list))
+    except Exception:
+        stats["errors"] += 1
+
+
+def import_npi_for_state(
+    state: str,
+    db_path: Optional[str] = None,
+) -> Dict[str, int]:
+    """Import NPI data for a single state by looking up our healthcare businesses."""
+    db = _get_forgedb(db_path)
+    ph = "%s" if db.is_postgres else "?"
+
+    stats = {
+        "our_healthcare_businesses": 0, "npi_lookups": 0, "phone_matches": 0,
+        "name_matches": 0, "npi_written": 0, "industry_written": 0, "errors": 0,
+    }
+
+    businesses = _fetch_healthcare_businesses(db, state, ph)
     stats["our_healthcare_businesses"] = len(businesses)
     logger.info("NPI %s: found %d healthcare businesses to look up", state, len(businesses))
 
     for biz in businesses:
         phone = normalize_phone(biz.get("phone", "") or "")
         name = (biz.get("name", "") or "").strip()
-
         if not name:
             continue
 
-        # Try NPI lookup by organization name + state
-        try:
-            resp = httpx.get(NPI_API_URL, params={
-                "version": "2.1",
-                "enumeration_type": "NPI-2",
-                "organization_name": name,
-                "state": state,
-                "limit": 5,
-            }, timeout=15.0)
-            data = resp.json()
-            stats["npi_lookups"] += 1
-        except Exception:
+        data = _lookup_npi(name, state)
+        if data is None:
             stats["errors"] += 1
             time.sleep(1)
             continue
+        stats["npi_lookups"] += 1
 
         results = data.get("results", [])
-        matched_npi = None
-        matched_industry = None
-
-        for r in results:
-            basic = r.get("basic", {})
-            org_name = basic.get("organization_name", "")
-            addresses = r.get("addresses", [])
-            taxonomies = r.get("taxonomies", [])
-
-            # Get phone from practice address
-            npi_phone = None
-            for addr in addresses:
-                if addr.get("address_purpose") == "LOCATION":
-                    npi_phone = normalize_phone(addr.get("telephone_number", ""))
-                    break
-
-            # Phone match
-            if phone and npi_phone and phone == npi_phone:
-                matched_npi = str(r.get("number", ""))
-                stats["phone_matches"] += 1
-            # Name match (exact, case-insensitive)
-            elif org_name.upper() == name.upper():
-                matched_npi = str(r.get("number", ""))
-                stats["name_matches"] += 1
-
-            if matched_npi:
-                # Get industry from taxonomy
-                for tax in taxonomies:
-                    if tax.get("primary"):
-                        matched_industry = classify_taxonomy(tax.get("desc", ""))
-                        break
-                break
+        matched_npi, matched_industry = _match_npi_results(results, phone, name, stats)
 
         if matched_npi:
-            try:
-                now_expr = "NOW()" if db.is_postgres else "datetime('now')"
-                uuid_cast = f"{ph}::uuid" if db.is_postgres else ph
-                updates = [f"npi_number = COALESCE(npi_number, {ph})"]
-                params_list = [matched_npi]
-                stats["npi_written"] += 1
+            _write_npi_match(db, biz["id"], matched_npi, matched_industry, stats, ph)
 
-                if matched_industry:
-                    updates.append(f"industry = COALESCE(industry, {ph})")
-                    params_list.append(matched_industry)
-                    stats["industry_written"] += 1
-
-                updates.append(f"updated_at = {now_expr}")
-                query = f"UPDATE businesses SET {', '.join(updates)} WHERE id = {uuid_cast}"
-                params_list.append(biz["id"])
-                with db.transaction() as tx:
-                    tx.execute(query, tuple(params_list))
-            except Exception:
-                stats["errors"] += 1
-
-        # Rate limit: 1 request per 0.3s to be polite
         time.sleep(0.3)
 
     db.close()

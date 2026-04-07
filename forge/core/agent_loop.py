@@ -117,107 +117,127 @@ class AgentLoop:
             AgentResult with status, turns used, errors, and final output.
         """
         start_time = time.time()
+        self._reset_state()
+
+        # Initialize conversation
+        self._context.set_system_prompt(self._config.system_prompt)
+        self._context.add_user_message(initial_message)
+
+        tool_defs = self._tools.get_tool_definitions()
+        logger.info(
+            "Agent starting — model=%s, tools=%d, max_turns=%d",
+            self._config.model, len(tool_defs), self._config.max_turns,
+        )
+
+        final_output = self._run_turns(tool_defs)
+
+        elapsed = time.time() - start_time
+        result = self._build_result(final_output, elapsed)
+        logger.info(
+            "Agent finished — status=%s, turns=%d, tool_calls=%d, time=%.1fs, errors=%d",
+            result.status, result.turns_used, result.tool_calls_made,
+            result.total_time, len(result.errors),
+        )
+        return result
+
+    def _reset_state(self) -> None:
+        """Reset all mutable state for a new run."""
         self._running = True
         self._turn_count = 0
         self._tool_call_count = 0
         self._consecutive_errors = 0
         self._errors = []
 
-        # Initialize conversation
-        self._context.set_system_prompt(self._config.system_prompt)
-        self._context.add_user_message(initial_message)
-
-        # Provide tool definitions to context
-        tool_defs = self._tools.get_tool_definitions()
-
-        logger.info(
-            "Agent starting — model=%s, tools=%d, max_turns=%d",
-            self._config.model, len(tool_defs), self._config.max_turns,
-        )
-
+    def _run_turns(self, tool_defs: List[Dict[str, Any]]) -> Optional[str]:
+        """Execute the turn loop until a stopping condition is met."""
         final_output = None
-
         try:
             while self._running and self._turn_count < self._config.max_turns:
                 self._turn_count += 1
-
-                # ── Step 1: Check if context needs compaction ──
                 if self._context.needs_compaction():
                     logger.info("Turn %d: compacting context", self._turn_count)
                     self._context.compact(self._model)
 
-                # ── Step 2: Send conversation to model ──
-                try:
-                    messages = self._context.get_messages()
-                    response = self._model.generate(
-                        messages=messages,
-                        tools=tool_defs,
-                        model=self._config.model,
-                        timeout=self._config.timeout_per_turn,
-                    )
-                    self._consecutive_errors = 0  # Reset on success
-                except Exception as e:
-                    self._consecutive_errors += 1
-                    error_msg = f"Turn {self._turn_count}: model error — {e}"
-                    logger.error(error_msg)
-                    self._errors.append(error_msg)
+                response = self._call_model(tool_defs)
+                if response is None:
                     if self._consecutive_errors >= self._config.max_consecutive_errors:
-                        logger.error("Circuit breaker: %d consecutive errors", self._consecutive_errors)
                         break
-                    time.sleep(2 ** min(self._consecutive_errors, 5))  # Exponential backoff
                     continue
 
-                # ── Step 3: Parse response for tool calls ──
-                tool_calls = self._parser.extract_tool_calls(response)
-                text_response = self._parser.extract_text(response)
-
-                # ── Step 4: Check stopping conditions ──
-                if self._should_stop(text_response, tool_calls):
-                    final_output = text_response
-                    logger.info("Turn %d: stopping condition met", self._turn_count)
+                result = self._process_response(response)
+                if result is not None:
+                    final_output = result
                     break
-
-                # ── Step 5: If no tool calls, add response and continue ──
-                if not tool_calls:
-                    self._context.add_assistant_message(text_response or "")
-                    final_output = text_response
-                    # If model didn't call any tools and didn't hit stop sequence,
-                    # it's probably done thinking
-                    if text_response:
-                        logger.info("Turn %d: model responded without tool calls", self._turn_count)
-                        break
-                    continue
-
-                # ── Step 6: Execute tool calls ──
-                self._context.add_assistant_message(response)
-
-                for tc in tool_calls:
-                    self._tool_call_count += 1
-                    tool_result = self._execute_tool(tc)
-                    self._context.add_tool_result(tc.name, tc.id, tool_result)
-
-                # ── Step 7: Notify callback if registered ──
-                if self._on_turn_complete:
-                    try:
-                        self._on_turn_complete(
-                            turn=self._turn_count,
-                            tool_calls=len(tool_calls),
-                            total_tool_calls=self._tool_call_count,
-                        )
-                    except Exception:
-                        pass  # Callback errors shouldn't kill the loop
-
         except KeyboardInterrupt:
             logger.warning("Agent interrupted by user")
             self._running = False
         except Exception as e:
             logger.error("Agent fatal error: %s\n%s", e, traceback.format_exc())
             self._errors.append(f"Fatal: {e}")
+        return final_output
 
-        elapsed = time.time() - start_time
+    def _call_model(self, tool_defs: List[Dict[str, Any]]) -> Optional[Any]:
+        """Send conversation to model, returning response or None on error."""
+        try:
+            messages = self._context.get_messages()
+            response = self._model.generate(
+                messages=messages,
+                tools=tool_defs,
+                model=self._config.model,
+                timeout=self._config.timeout_per_turn,
+            )
+            self._consecutive_errors = 0
+            return response
+        except Exception as e:
+            self._consecutive_errors += 1
+            error_msg = f"Turn {self._turn_count}: model error — {e}"
+            logger.error(error_msg)
+            self._errors.append(error_msg)
+            if self._consecutive_errors < self._config.max_consecutive_errors:
+                time.sleep(2 ** min(self._consecutive_errors, 5))
+            return None
+
+    def _process_response(self, response: Any) -> Optional[str]:
+        """Parse response and handle tool calls. Returns final_output if should stop, else None."""
+        tool_calls = self._parser.extract_tool_calls(response)
+        text_response = self._parser.extract_text(response)
+
+        if self._should_stop(text_response, tool_calls):
+            logger.info("Turn %d: stopping condition met", self._turn_count)
+            return text_response
+
+        if not tool_calls:
+            self._context.add_assistant_message(text_response or "")
+            if text_response:
+                logger.info("Turn %d: model responded without tool calls", self._turn_count)
+                return text_response
+            return None
+
+        self._handle_tool_calls(response, tool_calls)
+        return None
+
+    def _handle_tool_calls(self, response: Any, tool_calls: List[ToolCall]) -> None:
+        """Execute tool calls and notify callback."""
+        self._context.add_assistant_message(response)
+        for tc in tool_calls:
+            self._tool_call_count += 1
+            tool_result = self._execute_tool(tc)
+            self._context.add_tool_result(tc.name, tc.id, tool_result)
+
+        if self._on_turn_complete:
+            try:
+                self._on_turn_complete(
+                    turn=self._turn_count,
+                    tool_calls=len(tool_calls),
+                    total_tool_calls=self._tool_call_count,
+                )
+            except Exception:
+                pass  # Callback errors shouldn't kill the loop
+
+    def _build_result(self, final_output: Optional[str], elapsed: float) -> AgentResult:
+        """Build the final AgentResult."""
         status = self._determine_status(final_output)
-
-        result = AgentResult(
+        return AgentResult(
             status=status,
             turns_used=self._turn_count,
             total_time=elapsed,
@@ -225,14 +245,6 @@ class AgentLoop:
             errors=self._errors,
             final_output=final_output,
         )
-
-        logger.info(
-            "Agent finished — status=%s, turns=%d, tool_calls=%d, time=%.1fs, errors=%d",
-            result.status, result.turns_used, result.tool_calls_made,
-            result.total_time, len(result.errors),
-        )
-
-        return result
 
     def stop(self) -> None:
         """Gracefully stop the agent loop after current turn completes."""

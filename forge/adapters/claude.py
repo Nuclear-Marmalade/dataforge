@@ -187,6 +187,22 @@ class ClaudeAdapter:
             )
             raise last_error  # type: ignore[misc]
 
+    def _build_request_kwargs(
+        self, messages: List[Dict[str, Any]], model: str,
+        tools: Optional[List[Dict[str, Any]]], timeout: float, temperature: float,
+    ) -> Dict[str, Any]:
+        """Build the Anthropic Messages API request kwargs."""
+        system_text, user_messages = self._extract_system(messages)
+        converted = self._convert_messages(user_messages)
+        kwargs: Dict[str, Any] = {"model": model, "messages": converted, "max_tokens": 4096, "temperature": temperature}
+        if system_text:
+            kwargs["system"] = system_text
+        if tools:
+            kwargs["tools"] = self._convert_tools(tools)
+        if timeout != self._default_timeout:
+            kwargs["timeout"] = timeout
+        return kwargs
+
     def generate(
         self,
         messages: List[Dict[str, Any]],
@@ -196,20 +212,7 @@ class ClaudeAdapter:
         temperature: float = 0.3,
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        """
-        Send a chat completion request to Claude.
-
-        Accepts Ollama-style messages and tools, translates them to
-        Anthropic format, and returns a response dict compatible with
-        the FORGE agent loop.
-
-        Args:
-            messages: List of message dicts (role + content).  System messages
-                      are extracted and passed as the system parameter.
-            model: Model name (defaults to configured model).
-            tools: List of tool definitions (Ollama or Anthropic format).
-            timeout: Request timeout in seconds.
-            temperature: Sampling temperature.
+        """Send a chat completion request to Claude.
 
         Returns:
             Dict with 'message' containing 'role', 'content', and
@@ -217,46 +220,15 @@ class ClaudeAdapter:
         """
         model = model or self._default_model
         timeout = timeout or self._default_timeout
-
-        # Extract system prompt and convert messages
-        system_text, user_messages = self._extract_system(messages)
-        converted_messages = self._convert_messages(user_messages)
-
-        # Build request kwargs
-        request_kwargs: Dict[str, Any] = {
-            "model": model,
-            "messages": converted_messages,
-            "max_tokens": 4096,
-            "temperature": temperature,
-        }
-
-        if system_text:
-            request_kwargs["system"] = system_text
-
-        if tools:
-            request_kwargs["tools"] = self._convert_tools(tools)
-
-        if timeout != self._default_timeout:
-            # Override client timeout for this request
-            request_kwargs["timeout"] = timeout
+        request_kwargs = self._build_request_kwargs(messages, model, tools, timeout, temperature)
 
         def _do_create():
             return self._client.messages.create(**request_kwargs)
 
         response = self._call_with_retry(_do_create)
-
-        # Convert Anthropic response back to Ollama-compatible format
         result = self._response_to_ollama_format(response)
-
-        # Log usage
         usage = response.usage
-        logger.debug(
-            "Claude response: model=%s, input_tokens=%d, output_tokens=%d",
-            model,
-            usage.input_tokens,
-            usage.output_tokens,
-        )
-
+        logger.debug("Claude response: model=%s, input_tokens=%d, output_tokens=%d", model, usage.input_tokens, usage.output_tokens)
         return result
 
     @staticmethod
@@ -295,6 +267,18 @@ class ClaudeAdapter:
 
         return result
 
+    def _build_simple_kwargs(self, prompt: str, model: str, timeout: float, temperature: float, think: bool) -> Dict[str, Any]:
+        """Build request kwargs for generate_simple."""
+        kwargs: Dict[str, Any] = {"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": 4096}
+        if think:
+            kwargs["temperature"] = 1
+            kwargs["thinking"] = {"type": "enabled", "budget_tokens": 2048}
+        else:
+            kwargs["temperature"] = temperature
+        if timeout != self._default_timeout:
+            kwargs["timeout"] = timeout
+        return kwargs
+
     def generate_simple(
         self,
         prompt: str,
@@ -303,60 +287,19 @@ class ClaudeAdapter:
         temperature: float = 0.3,
         think: bool = False,
     ) -> str:
-        """
-        Simple text generation from a single prompt.
+        """Simple text generation from a single prompt.
 
-        Useful for one-shot tasks like classification or summarization
-        where you don't need tool calling or conversation history.
-
-        Args:
-            prompt: The text prompt.
-            model: Override the default model.
-            timeout: Override the default timeout.
-            temperature: Sampling temperature.
-            think: If True, enables extended thinking (Claude's chain-of-thought
-                   reasoning mode).  The thinking tokens are consumed but only
-                   the final answer text is returned.
-
-        Returns:
-            The response text directly.
+        Returns the response text directly.
         """
         model = model or self._default_model
         timeout = timeout or self._default_timeout
-
-        request_kwargs: Dict[str, Any] = {
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 4096,
-        }
-
-        if think:
-            # Extended thinking requires temperature=1 and uses the
-            # thinking block type.  Budget tokens control how much
-            # reasoning the model can do.
-            request_kwargs["temperature"] = 1
-            request_kwargs["thinking"] = {
-                "type": "enabled",
-                "budget_tokens": 2048,
-            }
-        else:
-            request_kwargs["temperature"] = temperature
-
-        if timeout != self._default_timeout:
-            request_kwargs["timeout"] = timeout
+        request_kwargs = self._build_simple_kwargs(prompt, model, timeout, temperature, think)
 
         def _do_create():
             return self._client.messages.create(**request_kwargs)
 
         response = self._call_with_retry(_do_create)
-
-        # Extract text content (skip thinking blocks)
-        text_parts = []
-        for block in response.content:
-            if block.type == "text":
-                text_parts.append(block.text)
-
-        return "".join(text_parts)
+        return "".join(block.text for block in response.content if block.type == "text")
 
     def generate_batch(
         self,

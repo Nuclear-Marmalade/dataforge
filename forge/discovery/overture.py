@@ -189,93 +189,45 @@ class OvertureDiscovery:
             )
         return result["lat"], result["lon"]
 
-    def search(
+    def _resolve_location(
         self,
-        zip_code: Optional[str] = None,
-        city: Optional[str] = None,
-        state: Optional[str] = None,
-        latitude: Optional[float] = None,
-        longitude: Optional[float] = None,
-        radius_miles: float = 10,
-        industry: Optional[str] = None,
-        limit: int = 1000,
-    ) -> List[dict]:
-        """
-        Search Overture Maps for businesses near a location.
-
-        Provide EITHER zip_code OR (latitude, longitude). City/state are
-        informational and used for logging only when lat/lon are given.
-
-        Args:
-            zip_code:      5-digit US ZIP code (geocoded automatically).
-            city:          City name (informational; not used for filtering).
-            state:         State abbreviation (informational; not used for filtering).
-            latitude:      Center latitude for the search.
-            longitude:     Center longitude for the search.
-            radius_miles:  Search radius in miles (default 10).
-            industry:      Optional FORGE industry slug to filter by.
-            limit:         Max number of results (default 1000).
-
-        Returns:
-            List of dicts, each with keys:
-                name, address, city, state, zip, lat, lon,
-                phone, website, category, overture_id
-
-        Raises:
-            OvertureDiscoveryError: On invalid input, network, or timeout issues.
-        """
-        # --- Resolve location ---
+        zip_code: Optional[str],
+        latitude: Optional[float],
+        longitude: Optional[float],
+    ) -> tuple:
+        """Resolve search inputs to (lat, lon) coordinates."""
         if latitude is not None and longitude is not None:
-            lat, lon = latitude, longitude
+            return latitude, longitude
         elif zip_code:
             lat, lon = self.geocode_zip(zip_code)
             logger.info("Geocoded ZIP %s -> (%.4f, %.4f)", zip_code, lat, lon)
+            return lat, lon
         else:
-            raise OvertureDiscoveryError(
-                "Provide either zip_code or (latitude, longitude)."
-            )
+            raise OvertureDiscoveryError("Provide either zip_code or (latitude, longitude).")
 
-        # --- Compute bounding box ---
-        delta = radius_miles * MILES_TO_DEGREES
-        min_lat = lat - delta
-        max_lat = lat + delta
-        min_lon = lon - delta
-        max_lon = lon + delta
+    @staticmethod
+    def _build_category_filter(industry: Optional[str]) -> str:
+        """Build a SQL category filter clause from a FORGE industry slug."""
+        if not industry:
+            return ""
 
-        # --- Build category filter ---
-        category_filter = ""
-        if industry:
-            # Check known industries first
-            if industry.lower() in _INDUSTRY_TO_CATEGORIES:
-                cats = _INDUSTRY_TO_CATEGORIES[industry.lower()]
-                cat_list = ", ".join(f"'{c}'" for c in cats)
-                category_filter = (
-                    f"AND categories.primary IN ({cat_list})"
-                )
-                logger.info(
-                    "Filtering to industry '%s' -> categories: %s",
-                    industry,
-                    cats,
-                )
-            else:
-                # Sanitize unknown values
-                safe_industry = re.sub(r'[^a-zA-Z0-9_\-\s]', '', industry.lower().strip())
-                if not safe_industry:
-                    logger.warning(
-                        "Industry '%s' rejected — invalid characters.", industry
-                    )
-                    return []
-                category_filter = (
-                    f"AND LOWER(categories.primary) = '{safe_industry}'"
-                )
-                logger.info(
-                    "Industry '%s' has no mapping; filtering raw category (sanitized: '%s').",
-                    industry,
-                    safe_industry,
-                )
+        if industry.lower() in _INDUSTRY_TO_CATEGORIES:
+            cats = _INDUSTRY_TO_CATEGORIES[industry.lower()]
+            cat_list = ", ".join(f"'{c}'" for c in cats)
+            logger.info("Filtering to industry '%s' -> categories: %s", industry, cats)
+            return f"AND categories.primary IN ({cat_list})"
 
-        # --- Build SQL ---
-        sql = f"""
+        safe_industry = re.sub(r'[^a-zA-Z0-9_\-\s]', '', industry.lower().strip())
+        if not safe_industry:
+            logger.warning("Industry '%s' rejected — invalid characters.", industry)
+            return ""
+        logger.info("Industry '%s' has no mapping; filtering raw category (sanitized: '%s').", industry, safe_industry)
+        return f"AND LOWER(categories.primary) = '{safe_industry}'"
+
+    @staticmethod
+    def _build_overture_sql(min_lat: float, max_lat: float, min_lon: float, max_lon: float, category_filter: str, limit: int) -> str:
+        """Build the DuckDB SQL query for Overture Maps."""
+        return f"""
         SELECT
             id                                          AS overture_id,
             names.primary                               AS name,
@@ -298,12 +250,11 @@ class OvertureDiscovery:
         LIMIT {limit}
         """
 
-        # --- Execute with timeout ---
-        label = f"({lat:.4f}, {lon:.4f}) r={radius_miles}mi"
-        if industry:
-            label += f" industry={industry}"
-        logger.info("Querying Overture Maps: %s ...", label)
+    def _execute_query(self, sql: str, label: str) -> tuple:
+        """Execute a DuckDB query and return (rows, columns).
 
+        Raises OvertureDiscoveryError on timeout or connection failure.
+        """
         start = time.time()
         try:
             result = self._conn.execute(sql)
@@ -314,36 +265,61 @@ class OvertureDiscovery:
             err_str = str(exc).lower()
             if elapsed >= QUERY_TIMEOUT_SECONDS or "timeout" in err_str:
                 raise OvertureDiscoveryError(
-                    f"Query timed out after {elapsed:.0f}s. "
-                    "Try a smaller radius or more specific industry."
-                )
+                    f"Query timed out after {elapsed:.0f}s. Try a smaller radius or more specific industry.")
             if "unable to connect" in err_str or "http" in err_str:
-                raise OvertureDiscoveryError(
-                    "Could not reach Overture Maps. Check internet connection."
-                )
+                raise OvertureDiscoveryError("Could not reach Overture Maps. Check internet connection.")
             raise OvertureDiscoveryError(f"DuckDB query failed: {exc}")
 
         elapsed = time.time() - start
-        logger.info(
-            "Overture query returned %d rows in %.1fs", len(rows), elapsed
-        )
+        logger.info("Overture query returned %d rows in %.1fs", len(rows), elapsed)
+        return rows, columns
 
+    @staticmethod
+    def _format_results(rows: list, columns: list) -> List[dict]:
+        """Convert raw DuckDB rows to dicts with forge_industry mapping."""
+        results: List[dict] = []
+        for row in rows:
+            record = dict(zip(columns, row))
+            raw_cat = record.get("category") or ""
+            record["forge_industry"] = _CATEGORY_TO_INDUSTRY.get(raw_cat.lower(), None)
+            results.append(record)
+        return results
+
+    def search(
+        self,
+        zip_code: Optional[str] = None,
+        city: Optional[str] = None,
+        state: Optional[str] = None,
+        latitude: Optional[float] = None,
+        longitude: Optional[float] = None,
+        radius_miles: float = 10,
+        industry: Optional[str] = None,
+        limit: int = 1000,
+    ) -> List[dict]:
+        """Search Overture Maps for businesses near a location.
+
+        Provide EITHER zip_code OR (latitude, longitude).
+        """
+        lat, lon = self._resolve_location(zip_code, latitude, longitude)
+
+        delta = radius_miles * MILES_TO_DEGREES
+        category_filter = self._build_category_filter(industry)
+        if industry and not category_filter:
+            return []
+
+        sql = self._build_overture_sql(lat - delta, lat + delta, lon - delta, lon + delta, category_filter, limit)
+
+        label = f"({lat:.4f}, {lon:.4f}) r={radius_miles}mi"
+        if industry:
+            label += f" industry={industry}"
+        logger.info("Querying Overture Maps: %s ...", label)
+
+        rows, columns = self._execute_query(sql, label)
         if not rows:
             logger.warning("No businesses found matching criteria: %s", label)
             return []
 
-        # --- Convert to dicts ---
-        results: List[dict] = []
-        for row in rows:
-            record = dict(zip(columns, row))
-            # Map Overture category to FORGE industry
-            raw_cat = record.get("category") or ""
-            record["forge_industry"] = _CATEGORY_TO_INDUSTRY.get(
-                raw_cat.lower(), None
-            )
-            results.append(record)
-
-        return results
+        return self._format_results(rows, columns)
 
     def close(self):
         """Close the DuckDB connection and release resources."""

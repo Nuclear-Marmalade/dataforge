@@ -135,60 +135,63 @@ class FetchUnenrichedTool(Tool):
             "required": ["missing_field"],
         }
 
+    def _fetch_via_forgedb(self, db, field: str, state: str, limit: int) -> list:
+        """Fetch unenriched rows using ForgeDB interface."""
+        ph = db.placeholder
+        query = (
+            f"SELECT id, name, phone, website_url, address_line1, city, state, zip,"
+            f" industry, sub_industry, email, ai_summary, health_score"
+            f" FROM businesses"
+            f" WHERE ({field} IS NULL OR {field} = '')"
+            f" AND website_url IS NOT NULL AND website_url != ''"
+        )
+        params: list = []
+        if state:
+            query += f" AND state = {ph}"
+            params.append(state.upper())
+        query += f" ORDER BY name ASC LIMIT {ph}"
+        params.append(limit)
+        return db.fetch_dicts(query, tuple(params))
+
+    def _fetch_via_psycopg2(self, field: str, state: str, limit: int) -> list:
+        """Fetch unenriched rows using legacy psycopg2 pool."""
+        import psycopg2.extras
+        conn = self._pool.get_connection()
+        try:
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            query = (
+                "SELECT id, name, phone, website_url, address_line1, city, state, zip,"
+                " industry, sub_industry, email, ai_summary, health_score"
+                " FROM businesses"
+                " WHERE ({field} IS NULL OR {field}::text = '')"
+                " AND website_url IS NOT NULL AND website_url != ''"
+            ).format(field=field)
+            params: list = []
+            if state:
+                query += " AND state = %s"
+                params.append(state.upper())
+            query += " ORDER BY name ASC LIMIT %s"
+            params.append(limit)
+            cur.execute(query, params)
+            rows = [dict(row) for row in cur.fetchall()]
+            cur.close()
+            return rows
+        finally:
+            self._pool.return_connection(conn)
+
     def execute(self, arguments: Dict[str, Any]) -> Any:
         field = arguments["missing_field"]
-        state = arguments.get("state")
+        state_raw = arguments.get("state")
+        state: str = str(state_raw) if state_raw is not None else ""
         limit = min(arguments.get("limit", 5), 20)
 
         try:
-            # Use ForgeDB if available on the pool, otherwise fall back
             db = getattr(self._pool, '_db', None)
             if db is not None:
-                ph = db.placeholder
-                # field is from enum, safe to format directly
-                query = f"""
-                    SELECT id, name, phone, website_url, address_line1, city, state, zip,
-                           industry, sub_industry, email, ai_summary, health_score
-                    FROM businesses
-                    WHERE ({field} IS NULL OR {field} = '')
-                    AND website_url IS NOT NULL AND website_url != ''
-                """
-                params: list = []
-                if state:
-                    query += f" AND state = {ph}"
-                    params.append(state.upper())
-                query += f" ORDER BY name ASC LIMIT {ph}"
-                params.append(limit)
-                rows = db.fetch_dicts(query, tuple(params))
+                rows = self._fetch_via_forgedb(db, field, state, limit)
             else:
-                # Legacy psycopg2 path
-                import psycopg2.extras
-                conn = self._pool.get_connection()
-                try:
-                    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-                    query = """
-                        SELECT id, name, phone, website_url, address_line1, city, state, zip,
-                               industry, sub_industry, email, ai_summary, health_score
-                        FROM businesses
-                        WHERE ({field} IS NULL OR {field}::text = '')
-                        AND website_url IS NOT NULL AND website_url != ''
-                    """.format(field=field)
-                    params = []
-                    if state:
-                        query += " AND state = %s"
-                        params.append(state.upper())
-                    query += " ORDER BY name ASC LIMIT %s"
-                    params.append(limit)
-                    cur.execute(query, params)
-                    rows = [dict(row) for row in cur.fetchall()]
-                    cur.close()
-                finally:
-                    self._pool.return_connection(conn)
-
-            return {
-                "count": len(rows),
-                "businesses": rows,
-            }
+                rows = self._fetch_via_psycopg2(field, state, limit)
+            return {"count": len(rows), "businesses": rows}
         except Exception as e:
             logger.error("fetch_unenriched failed: %s", e)
             return {"error": str(e), "count": 0, "businesses": []}
@@ -234,29 +237,58 @@ class WriteEnrichmentTool(Tool):
             "required": ["business_id", "updates"],
         }
 
+    # Allowed fields for enrichment — prevents injection
+    ALLOWED_FIELDS = {
+        "email", "industry", "sub_industry", "ai_summary", "health_score",
+        "lead_score", "pain_points", "opportunities", "tech_stack",
+        "cms_detected", "ssl_valid", "mobile_score", "site_speed_ms",
+        "site_quality_score", "social_links", "facebook_url",
+        "instagram_url", "linkedin_url", "twitter_url",
+        "business_hours", "year_established", "employee_estimate",
+    }
+
+    def _write_via_psycopg2(self, business_id: str, safe_updates: dict) -> dict:
+        """Write enrichment using legacy psycopg2 pool."""
+        conn = self._pool.get_connection()
+        try:
+            cur = conn.cursor()
+            set_clauses: list = []
+            params: list = []
+            for field_name, value in safe_updates.items():
+                if isinstance(value, (dict, list)):
+                    set_clauses.append(f"{field_name} = COALESCE({field_name}, %s::jsonb)")
+                    params.append(json.dumps(value))
+                elif isinstance(value, (int, float, bool)):
+                    set_clauses.append(f"{field_name} = COALESCE({field_name}, %s)")
+                    params.append(value)
+                elif isinstance(value, str):
+                    set_clauses.append(f"{field_name} = COALESCE({field_name}, %s)")
+                    params.append(value[:500])
+            if not set_clauses:
+                return {"status": "no_valid_values"}
+            set_clauses.append("updated_at = NOW()")
+            query = "UPDATE businesses SET {} WHERE id = %s".format(", ".join(set_clauses))
+            params.append(business_id)
+            cur.execute(query, params)
+            conn.commit()
+            cur.close()
+            return {"status": "updated", "business_id": business_id, "fields_updated": list(safe_updates.keys())}
+        except Exception as e:
+            conn.rollback()
+            logger.error("write_enrichment failed for %s: %s", business_id, e)
+            return {"error": str(e)}
+        finally:
+            self._pool.return_connection(conn)
+
     def execute(self, arguments: Dict[str, Any]) -> Any:
         business_id = arguments["business_id"]
         updates = arguments.get("updates", {})
-
         if not updates:
             return {"status": "no_updates"}
-
-        # Allowed fields for enrichment — prevents injection
-        ALLOWED_FIELDS = {
-            "email", "industry", "sub_industry", "ai_summary", "health_score",
-            "lead_score", "pain_points", "opportunities", "tech_stack",
-            "cms_detected", "ssl_valid", "mobile_score", "site_speed_ms",
-            "site_quality_score", "social_links", "facebook_url",
-            "instagram_url", "linkedin_url", "twitter_url",
-            "business_hours", "year_established", "employee_estimate",
-        }
-
-        # Filter to allowed fields only
-        safe_updates = {k: v for k, v in updates.items() if k in ALLOWED_FIELDS}
+        safe_updates = {k: v for k, v in updates.items() if k in self.ALLOWED_FIELDS}
         if not safe_updates:
             return {"status": "no_valid_fields", "rejected": list(updates.keys())}
 
-        # Use ForgeDB if available
         db = getattr(self._pool, '_db', None)
         if db is not None:
             try:
@@ -264,52 +296,7 @@ class WriteEnrichmentTool(Tool):
             except Exception as e:
                 logger.error("write_enrichment failed for %s: %s", business_id, e)
                 return {"error": str(e)}
-
-        # Legacy psycopg2 path
-        conn = self._pool.get_connection()
-        try:
-            cur = conn.cursor()
-
-            set_clauses = []
-            params: list = []
-
-            for field_name, value in safe_updates.items():
-                if isinstance(value, (dict, list)):
-                    set_clauses.append(f"{field_name} = COALESCE({field_name}, %s::jsonb)")
-                    params.append(json.dumps(value))
-                elif isinstance(value, (int, float)):
-                    set_clauses.append(f"{field_name} = COALESCE({field_name}, %s)")
-                    params.append(value)
-                elif isinstance(value, str):
-                    set_clauses.append(f"{field_name} = COALESCE({field_name}, %s)")
-                    params.append(value[:500])
-                elif isinstance(value, bool):
-                    set_clauses.append(f"{field_name} = COALESCE({field_name}, %s)")
-                    params.append(value)
-
-            if not set_clauses:
-                return {"status": "no_valid_values"}
-
-            set_clauses.append("updated_at = NOW()")
-
-            query = "UPDATE businesses SET {} WHERE id = %s".format(", ".join(set_clauses))
-            params.append(business_id)
-
-            cur.execute(query, params)
-            conn.commit()
-            cur.close()
-
-            return {
-                "status": "updated",
-                "business_id": business_id,
-                "fields_updated": list(safe_updates.keys()),
-            }
-        except Exception as e:
-            conn.rollback()
-            logger.error("write_enrichment failed for %s: %s", business_id, e)
-            return {"error": str(e)}
-        finally:
-            self._pool.return_connection(conn)
+        return self._write_via_psycopg2(business_id, safe_updates)
 
 
 class BatchWriteEnrichmentTool(Tool):

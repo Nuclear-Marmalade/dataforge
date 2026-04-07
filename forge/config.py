@@ -73,56 +73,43 @@ def _parse_dotenv(path: Path) -> Dict[str, str]:
     return result
 
 
+def _parse_toml_line(line: str, current_section: str, result: Dict[str, Dict[str, str]]) -> str:
+    """Parse a single TOML line into result. Returns (possibly updated) current_section."""
+    line = line.strip()
+    if not line or line.startswith("#"):
+        return current_section
+    if line.startswith("[") and line.endswith("]"):
+        current_section = line[1:-1].strip()
+        if current_section not in result:
+            result[current_section] = {}
+        return current_section
+    if "=" not in line:
+        return current_section
+    key, _, value = line.partition("=")
+    key = key.strip()
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+        value = value[1:-1].replace('\\"', '"').replace('\\\\', '\\')
+    for comment_char in (" #", "\t#"):
+        idx = value.find(comment_char)
+        if idx >= 0:
+            value = value[:idx].strip()
+    result[current_section][key] = value
+    return current_section
+
+
 def _parse_toml(path: Path) -> Dict[str, Dict[str, str]]:
-    """
-    Parse a minimal TOML file with [sections] and key = value pairs.
-
-    Only supports flat sections (no nested tables, no arrays, no inline
-    tables).  This covers the config.toml use case without pulling in a
-    TOML library.
-
-    Returns:
-        {"section": {"key": "value", ...}, ...}
-        Keys without a section go under "default".
-    """
+    """Parse a minimal TOML file with [sections] and key = value pairs."""
     result: Dict[str, Dict[str, str]] = {"default": {}}
     if not path.is_file():
         return result
-
-    current_section = "default"
-
     try:
+        current_section = "default"
         with open(path) as f:
             for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                # Section header
-                if line.startswith("[") and line.endswith("]"):
-                    current_section = line[1:-1].strip()
-                    if current_section not in result:
-                        result[current_section] = {}
-                    continue
-                # Key = value
-                if "=" not in line:
-                    continue
-                key, _, value = line.partition("=")
-                key = key.strip()
-                value = value.strip()
-                # Strip quotes
-                if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
-                    value = value[1:-1]
-                    # Unescape TOML escape sequences (quotes first, then backslashes)
-                    value = value.replace('\\"', '"').replace('\\\\', '\\')
-                # Strip inline comments
-                for comment_char in (" #", "\t#"):
-                    idx = value.find(comment_char)
-                    if idx >= 0:
-                        value = value[:idx].strip()
-                result[current_section][key] = value
+                current_section = _parse_toml_line(line, current_section, result)
     except OSError as e:
         logger.debug("Could not read %s: %s", path, e)
-
     return result
 
 
@@ -230,32 +217,8 @@ class ForgeConfig:
     # ── Loading ─────────────────────────────────────────────────────
 
     @classmethod
-    def load(cls, cli_args: Optional[Dict[str, Any]] = None) -> "ForgeConfig":
-        """
-        Load config from multiple sources (highest priority first):
-
-          1. cli_args dict (if provided)
-          2. Environment variables (FORGE_DB_HOST, FORGE_WORKERS, ...)
-          3. .env file in CWD
-          4. ~/.forge/config.toml
-          5. Dataclass defaults
-
-        Returns a fully-resolved ForgeConfig instance.
-        """
-        # Start with defaults
-        config = cls()
-
-        # Layer 5 → 2: build a merged flat dict (lowest priority first)
-        layers: List[Dict[str, str]] = []
-
-        # Layer 4: TOML config file
-        toml_data = _parse_toml(_TOML_PATH)
-        layers.append(_flatten_toml(toml_data))
-
-        # Layer 3: .env file
-        layers.append(_parse_dotenv(_DOTENV_PATH))
-
-        # Layer 2: environment variables
+    def _build_env_layer(cls) -> Dict[str, str]:
+        """Collect environment variables into a config layer."""
         env_layer: Dict[str, str] = {}
         for f in fields(cls):
             if f.name.startswith("_"):
@@ -264,17 +227,13 @@ class ForgeConfig:
             val = os.environ.get(env_key)
             if val is not None:
                 env_layer[f.name] = val
-        # Also check ANTHROPIC_API_KEY directly (common convention)
         if "ANTHROPIC_API_KEY" in os.environ and "anthropic_api_key" not in env_layer:
             env_layer["anthropic_api_key"] = os.environ["ANTHROPIC_API_KEY"]
-        layers.append(env_layer)
+        return env_layer
 
-        # Layer 1: CLI args
-        if cli_args:
-            cli_layer = {k: str(v) for k, v in cli_args.items() if v is not None}
-            layers.append(cli_layer)
-
-        # Merge layers onto config (later layers = higher priority)
+    @classmethod
+    def _apply_layers(cls, config: "ForgeConfig", layers: List[Dict[str, str]]) -> None:
+        """Merge config layers onto a ForgeConfig instance."""
         field_types = {f.name: f.type for f in fields(cls) if not f.name.startswith("_")}
         for layer in layers:
             for key, value in layer.items():
@@ -293,13 +252,19 @@ class ForgeConfig:
                 except (ValueError, TypeError) as e:
                     logger.warning("Invalid config value %s=%r: %s", key, value, e)
 
-        logger.info(
-            "Config loaded — backend=%s, adapter=%s, workers=%d",
-            config.db_backend,
-            config.adapter,
-            config.workers,
-        )
+    @classmethod
+    def load(cls, cli_args: Optional[Dict[str, Any]] = None) -> "ForgeConfig":
+        """Load config from multiple sources (highest priority first)."""
+        config = cls()
+        layers: List[Dict[str, str]] = []
+        layers.append(_flatten_toml(_parse_toml(_TOML_PATH)))
+        layers.append(_parse_dotenv(_DOTENV_PATH))
+        layers.append(cls._build_env_layer())
+        if cli_args:
+            layers.append({k: str(v) for k, v in cli_args.items() if v is not None})
 
+        cls._apply_layers(config, layers)
+        logger.info("Config loaded — backend=%s, adapter=%s, workers=%d", config.db_backend, config.adapter, config.workers)
         return config
 
     # ── Persistence helpers ─────────────────────────────────────────
@@ -416,64 +381,50 @@ class ForgeConfig:
                 "db_name": self.db_name,
             }
 
+    def _try_claude_adapter(self):
+        """Try to create a Claude adapter. Returns adapter or None."""
+        try:
+            from forge.adapters.claude import ClaudeAdapter
+            adapter = ClaudeAdapter(api_key=self.anthropic_api_key, default_model=self.claude_model)
+            logger.info("Auto-detected Claude adapter (API key present)")
+            return adapter
+        except Exception as e:
+            logger.warning("Claude adapter init failed: %s", e)
+            return None
+
+    def _try_ollama_adapter(self):
+        """Try to create an Ollama adapter. Returns adapter or None."""
+        try:
+            from forge.adapters.ollama import OllamaAdapter
+            adapter = OllamaAdapter(base_url=self.ollama_url, default_model=self.ollama_model)
+            if adapter.is_healthy():
+                logger.info("Auto-detected Ollama adapter at %s", self.ollama_url)
+                return adapter
+            adapter.close()
+        except Exception as e:
+            logger.debug("Ollama not available: %s", e)
+        return None
+
     def get_adapter(self):
-        """
-        Return the appropriate AI adapter based on configuration.
-
-        Auto-detection order:
-          1. If anthropic_api_key is set -> ClaudeAdapter
-          2. If Ollama is healthy at ollama_url -> OllamaAdapter
-          3. None (email-only mode)
-
-        If adapter is explicitly set to "claude" or "ollama", skip
-        auto-detection and use that adapter directly.
-        """
-        # Explicit adapter selection
+        """Return the appropriate AI adapter based on configuration."""
         if self.adapter == "claude":
             from forge.adapters.claude import ClaudeAdapter
-            return ClaudeAdapter(
-                api_key=self.anthropic_api_key,
-                default_model=self.claude_model,
-            )
-
+            return ClaudeAdapter(api_key=self.anthropic_api_key, default_model=self.claude_model)
         if self.adapter == "ollama":
             from forge.adapters.ollama import OllamaAdapter
-            return OllamaAdapter(
-                base_url=self.ollama_url,
-                default_model=self.ollama_model,
-            )
-
+            return OllamaAdapter(base_url=self.ollama_url, default_model=self.ollama_model)
         if self.adapter == "none":
             logger.info("Adapter explicitly set to 'none' — email-only mode")
             return None
 
-        # Auto-detection
         if self.anthropic_api_key:
-            try:
-                from forge.adapters.claude import ClaudeAdapter
-                adapter = ClaudeAdapter(
-                    api_key=self.anthropic_api_key,
-                    default_model=self.claude_model,
-                )
-                logger.info("Auto-detected Claude adapter (API key present)")
+            adapter = self._try_claude_adapter()
+            if adapter:
                 return adapter
-            except Exception as e:
-                logger.warning("Claude adapter init failed: %s", e)
 
-        # Try Ollama
-        try:
-            from forge.adapters.ollama import OllamaAdapter
-            adapter = OllamaAdapter(
-                base_url=self.ollama_url,
-                default_model=self.ollama_model,
-            )
-            if adapter.is_healthy():
-                logger.info("Auto-detected Ollama adapter at %s", self.ollama_url)
-                return adapter
-            else:
-                adapter.close()
-        except Exception as e:
-            logger.debug("Ollama not available: %s", e)
+        adapter = self._try_ollama_adapter()
+        if adapter:
+            return adapter
 
         logger.info("No AI adapter available — running in email-only mode")
         return None
@@ -487,66 +438,22 @@ def cli_config_show() -> None:
     print(config.show())
 
 
-def cli_config_set(key: str, value: str) -> None:
-    """
-    Handle `forge config set KEY VALUE` command.
+_CONFIG_SECTION_MAP = {
+    "db_backend": "database", "db_path": "database", "db_host": "database",
+    "db_port": "database", "db_user": "database", "db_password": "database", "db_name": "database",
+    "adapter": "ai", "anthropic_api_key": "ai", "ollama_url": "ai",
+    "ollama_model": "ai", "claude_model": "ai",
+    "workers": "enrichment", "batch_size": "enrichment", "rate_limit": "enrichment",
+    "smtp_from": "smtp", "smtp_ehlo": "smtp",
+    "sam_gov_api_key": "sam",
+    "dashboard_port": "dashboard",
+}
 
-    Writes the key-value pair to ~/.forge/config.toml under the
-    appropriate section.
-    """
-    # Map config keys to TOML sections
-    section_map = {
-        "db_backend": "database",
-        "db_path": "database",
-        "db_host": "database",
-        "db_port": "database",
-        "db_user": "database",
-        "db_password": "database",
-        "db_name": "database",
-        "adapter": "ai",
-        "anthropic_api_key": "ai",
-        "ollama_url": "ai",
-        "ollama_model": "ai",
-        "claude_model": "ai",
-        "workers": "enrichment",
-        "batch_size": "enrichment",
-        "rate_limit": "enrichment",
-        "smtp_from": "smtp",
-        "smtp_ehlo": "smtp",
-        "sam_gov_api_key": "sam",
-        "dashboard_port": "dashboard",
-    }
+_SECTION_PREFIX = {"database": "db_", "smtp": "smtp_", "sam": "sam_gov_", "dashboard": "dashboard_"}
 
-    # Validate key
-    valid_keys = {f.name for f in fields(ForgeConfig) if not f.name.startswith("_")}
-    if key not in valid_keys:
-        print(f"ERROR: Unknown config key '{key}'")
-        print(f"Valid keys: {', '.join(sorted(valid_keys))}")
-        sys.exit(1)
 
-    section = section_map.get(key, "default")
-    # Strip db_ prefix for the TOML key in the [database] section (etc.)
-    section_prefix = {
-        "database": "db_",
-        "smtp": "smtp_",
-        "sam": "sam_gov_",
-        "dashboard": "dashboard_",
-    }
-    prefix = section_prefix.get(section, "")
-    toml_key = key[len(prefix):] if prefix and key.startswith(prefix) else key
-
-    # Read existing file
-    toml_path = _TOML_PATH
-    toml_path.parent.mkdir(parents=True, exist_ok=True)
-
-    existing = _parse_toml(toml_path)
-
-    # Update
-    if section not in existing:
-        existing[section] = {}
-    existing[section][toml_key] = value
-
-    # Write back
+def _write_toml(toml_path: Path, existing: Dict) -> None:
+    """Write parsed TOML sections back to disk."""
     with open(toml_path, "w") as f:
         for sec_name, sec_data in existing.items():
             if sec_name == "default" and not sec_data:
@@ -556,5 +463,26 @@ def cli_config_set(key: str, value: str) -> None:
             for k, v in sec_data.items():
                 f.write(f"{k} = {_safe_toml_value(v)}\n")
 
+
+def cli_config_set(key: str, value: str) -> None:
+    """Handle `forge config set KEY VALUE` command."""
+    valid_keys = {f.name for f in fields(ForgeConfig) if not f.name.startswith("_")}
+    if key not in valid_keys:
+        print(f"ERROR: Unknown config key '{key}'")
+        print(f"Valid keys: {', '.join(sorted(valid_keys))}")
+        sys.exit(1)
+
+    section = _CONFIG_SECTION_MAP.get(key, "default")
+    prefix = _SECTION_PREFIX.get(section, "")
+    toml_key = key[len(prefix):] if prefix and key.startswith(prefix) else key
+
+    toml_path = _TOML_PATH
+    toml_path.parent.mkdir(parents=True, exist_ok=True)
+    existing = _parse_toml(toml_path)
+    if section not in existing:
+        existing[section] = {}
+    existing[section][toml_key] = value
+
+    _write_toml(toml_path, existing)
     print(f"Set {key} = {_mask_secret(value) if key in ForgeConfig._SECRET_FIELDS else value}")
     print(f"Written to {toml_path}")

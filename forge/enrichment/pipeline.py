@@ -123,6 +123,22 @@ class EnrichmentPipeline:
         self._running = False
         self._lock = threading.Lock()
 
+    def _start_track_threads(self, mode: str, state_filter: Optional[str],
+                             max_records: Optional[int], resume: bool) -> List[threading.Thread]:
+        """Start enrichment track threads based on mode. Returns thread list."""
+        threads = []
+        if mode in ("email", "both"):
+            t = threading.Thread(target=self._run_email_extraction_thread, args=(state_filter, max_records, resume),
+                                 name="email-extractor", daemon=True)
+            threads.append(t)
+            t.start()
+        if mode in ("ai", "both"):
+            t = threading.Thread(target=self._run_ai_enrichment, args=(state_filter, max_records, resume),
+                                 name="ai-enricher", daemon=True)
+            threads.append(t)
+            t.start()
+        return threads
+
     def run(
         self,
         mode: str = "both",
@@ -130,53 +146,19 @@ class EnrichmentPipeline:
         max_records: Optional[int] = None,
         resume: bool = True,
     ) -> EnrichmentStats:
-        """
-        Run the enrichment pipeline.
-
-        Args:
-            mode: "email" (web scraping only), "ai" (LLM only), or "both"
-            state_filter: Optional US state code to filter by
-            max_records: Maximum records to process (None = unlimited)
-            resume: If True, skip already-enriched records
+        """Run the enrichment pipeline.
 
         Returns:
             EnrichmentStats with results.
         """
         self._running = True
         self._stats = EnrichmentStats(start_time=time.time())
+        logger.info("Enrichment pipeline starting — mode=%s, state=%s, max=%s, workers=%d, resume=%s",
+                     mode, state_filter or "all", max_records or "unlimited", self._web_workers, resume)
 
-        logger.info(
-            "Enrichment pipeline starting — mode=%s, state=%s, max=%s, workers=%d, resume=%s",
-            mode, state_filter or "all", max_records or "unlimited",
-            self._web_workers, resume,
-        )
-
-        threads = []
-
-        if mode in ("email", "both"):
-            t = threading.Thread(
-                target=self._run_email_extraction_thread,
-                args=(state_filter, max_records, resume),
-                name="email-extractor",
-                daemon=True,
-            )
-            threads.append(t)
-            t.start()
-
-        if mode in ("ai", "both"):
-            t = threading.Thread(
-                target=self._run_ai_enrichment,
-                args=(state_filter, max_records, resume),
-                name="ai-enricher",
-                daemon=True,
-            )
-            threads.append(t)
-            t.start()
-
-        # Wait for all threads
+        threads = self._start_track_threads(mode, state_filter, max_records, resume)
         for t in threads:
             t.join()
-
         logger.info("Enrichment complete: %s", self._stats.summary())
         return self._stats
 
@@ -202,138 +184,146 @@ class EnrichmentPipeline:
             loop.run_until_complete(self._scraper.close())
             loop.close()
 
+    def _fetch_and_build_url_map(
+        self,
+        state_filter: Optional[str],
+        resume: bool,
+    ) -> tuple:
+        """Fetch businesses for scraping and build URL-to-business mapping.
+
+        Returns (urls, url_biz_map) or ([], {}) if nothing to process.
+        """
+        businesses = self._fetch_businesses_for_scrape(
+            state=state_filter,
+            limit=self._web_workers * 2,
+            resume=resume,
+        )
+        if not businesses:
+            return [], {}
+
+        url_biz_map: Dict[str, dict] = {}
+        urls: List[str] = []
+        for biz in businesses:
+            url = biz.get("website_url", "")
+            if url:
+                urls.append(url)
+                url_biz_map[url] = biz
+        return urls, url_biz_map
+
+    def _process_scrape_result(self, result: Dict[str, Any], url_biz_map: Dict[str, dict]) -> tuple:
+        """Process a single scrape result into enrichment updates.
+
+        Returns (biz_id, updates_dict_or_None, is_failure).
+        """
+        url = result.get("url", "")
+        matched_biz = url_biz_map.get(url)
+        if not matched_biz:
+            return None, None, False
+
+        status = result.get("status", "unknown")
+        if status not in ("ok", "ok_no_ssl"):
+            logger.info("Scrape failed for %s: %s", url[:80], status)
+            return matched_biz["id"], None, True
+
+        updates: Dict[str, Any] = {}
+        if result.get("emails"):
+            updates["email"] = result["emails"][0]
+            with self._lock:
+                self._stats.emails_found += 1
+        if result.get("tech_stack"):
+            updates["tech_stack"] = json.dumps(result["tech_stack"])
+            with self._lock:
+                self._stats.tech_stacks_found += 1
+        if result.get("cms_detected"):
+            updates["cms_detected"] = result["cms_detected"]
+        if result.get("ssl_valid") is not None:
+            updates["ssl_valid"] = result["ssl_valid"]
+        if result.get("site_speed_ms") is not None:
+            updates["site_speed_ms"] = result["site_speed_ms"]
+
+        return matched_biz["id"], updates if updates else None, False
+
+    def _flush_batch(self, batch_enrichments: List[tuple], batch_tracking_ids: List[str]) -> None:
+        """Write enrichment data and tracking updates to DB."""
+        if batch_enrichments:
+            try:
+                self._write_enrichment_batch(batch_enrichments, source="scraper")
+            except Exception as e:
+                with self._lock:
+                    self._stats.scrape_failures += len(batch_enrichments)
+                logger.error("Batch enrichment write failed: %s", e)
+
+        if batch_tracking_ids:
+            try:
+                self._update_enrichment_tracking_batch(batch_tracking_ids)
+            except Exception as e:
+                logger.error("Batch tracking update failed: %s", e)
+
+    def _collect_scrape_results(
+        self,
+        results: List[Dict[str, Any]],
+        url_biz_map: Dict[str, dict],
+        processed: int,
+        max_records: Optional[int],
+    ) -> tuple:
+        """Collect enrichment data from scrape results.
+
+        Returns (batch_enrichments, batch_tracking_ids, new_processed).
+        """
+        batch_enrichments: List[tuple] = []
+        batch_tracking_ids: List[str] = []
+
+        for result in results:
+            if not self._running:
+                break
+            try:
+                biz_id, updates, is_failure = self._process_scrape_result(result, url_biz_map)
+            except Exception as e:
+                with self._lock:
+                    self._stats.scrape_failures += 1
+                logger.debug("Scrape result processing failed: %s", e)
+                continue
+
+            if biz_id is None:
+                continue
+
+            if is_failure:
+                with self._lock:
+                    self._stats.scrape_failures += 1
+            elif updates:
+                batch_enrichments.append((biz_id, updates))
+            batch_tracking_ids.append(biz_id)
+
+            with self._lock:
+                self._stats.total_processed += 1
+                processed += 1
+            if max_records and processed >= max_records:
+                self._running = False
+                break
+
+        return batch_enrichments, batch_tracking_ids, processed
+
     async def _run_email_extraction(
         self,
         state_filter: Optional[str],
         max_records: Optional[int],
         resume: bool,
     ) -> None:
-        """
-        Async scrape websites for email, tech stack, CMS, SSL, speed.
-
-        Fetches businesses with websites but missing data,
-        scrapes each website, and writes ALL extracted data to DB.
-        """
+        """Async scrape websites for email, tech stack, CMS, SSL, speed."""
         logger.info("Email extraction track starting (%d async workers)", self._web_workers)
         processed = 0
 
         while self._running:
-            # Fetch a batch of businesses needing web enrichment
-            businesses = self._fetch_businesses_for_scrape(
-                state=state_filter,
-                limit=self._web_workers * 2,
-                resume=resume,
-            )
-
-            if not businesses:
+            urls, url_biz_map = self._fetch_and_build_url_map(state_filter, resume)
+            if not urls:
                 logger.info("Email extraction: no more businesses to process")
                 break
 
-            # Collect URLs and map back to business records
-            url_biz_map = {}
-            urls = []
-            for biz in businesses:
-                url = biz.get("website_url", "")
-                if url:
-                    urls.append(url)
-                    url_biz_map[url] = biz
-
-            if not urls:
-                break
-
-            # Scrape all URLs concurrently
             results = await self._scraper.scrape_batch(urls)
+            enrichments, tracking_ids, processed = self._collect_scrape_results(
+                results, url_biz_map, processed, max_records)
+            self._flush_batch(enrichments, tracking_ids)
 
-            # Collect all enrichment updates and tracking IDs for batch write
-            batch_enrichments: List[tuple] = []  # (business_id, updates_dict)
-            batch_tracking_ids: List[str] = []
-
-            for result in results:
-                if not self._running:
-                    break
-
-                url = result.get("url", "")
-                matched_biz = url_biz_map.get(url)
-                if not matched_biz:
-                    continue
-
-                # Check for scrape failures (connection errors, timeouts, etc.)
-                status = result.get("status", "unknown")
-                if status not in ("ok", "ok_no_ssl"):
-                    with self._lock:
-                        self._stats.scrape_failures += 1
-                    logger.info("Scrape failed for %s: %s", url[:80], status)
-                    batch_tracking_ids.append(matched_biz["id"])
-                    with self._lock:
-                        self._stats.total_processed += 1
-                        processed += 1
-                    if max_records and processed >= max_records:
-                        self._running = False
-                    continue
-
-                try:
-                    updates = {}
-
-                    # Email
-                    if result.get("emails"):
-                        updates["email"] = result["emails"][0]
-                        with self._lock:
-                            self._stats.emails_found += 1
-
-                    # Tech stack (JSON array)
-                    if result.get("tech_stack"):
-                        updates["tech_stack"] = json.dumps(result["tech_stack"])
-                        with self._lock:
-                            self._stats.tech_stacks_found += 1
-
-                    # CMS detected
-                    if result.get("cms_detected"):
-                        updates["cms_detected"] = result["cms_detected"]
-
-                    # SSL valid
-                    if result.get("ssl_valid") is not None:
-                        updates["ssl_valid"] = result["ssl_valid"]
-
-                    # Site speed (TTFB in ms)
-                    if result.get("site_speed_ms") is not None:
-                        updates["site_speed_ms"] = result["site_speed_ms"]
-
-                    # Collect for batch write
-                    if updates:
-                        batch_enrichments.append((matched_biz["id"], updates))
-
-                    # Always track enrichment attempt
-                    batch_tracking_ids.append(matched_biz["id"])
-
-                except Exception as e:
-                    with self._lock:
-                        self._stats.scrape_failures += 1
-                    logger.debug("Scrape result processing failed for %s: %s", matched_biz.get("name", "?"), e)
-
-                with self._lock:
-                    self._stats.total_processed += 1
-                    processed += 1
-
-                if max_records and processed >= max_records:
-                    self._running = False
-                    break
-
-            # Flush batch: one transaction for enrichment data, one for tracking
-            if batch_enrichments:
-                try:
-                    self._write_enrichment_batch(batch_enrichments, source="scraper")
-                except Exception as e:
-                    with self._lock:
-                        self._stats.scrape_failures += len(batch_enrichments)
-                    logger.error("Batch enrichment write failed: %s", e)
-
-            if batch_tracking_ids:
-                try:
-                    self._update_enrichment_tracking_batch(batch_tracking_ids)
-                except Exception as e:
-                    logger.error("Batch tracking update failed: %s", e)
-
-            # Progress log every batch
             with self._lock:
                 logger.info("Email track: %s", self._stats.summary())
 
@@ -389,37 +379,15 @@ class EnrichmentPipeline:
                 with self._lock:
                     logger.info("AI track: %s", self._stats.summary())
 
-    def _enrich_single_ai(self, business: dict) -> None:
-        """Enrich a single business with Gemma 26B-A4B."""
-        from forge.enrichment.prompts import build_single_enrichment_prompt
-
-        prompt = build_single_enrichment_prompt(business)
-
-        response = self._ollama.generate_simple(prompt, timeout=90.0)
-        logger.debug("Gemma raw output for %s: %s", business.get("name", "?"), response[:200])
-
-        parsed = extract_json_from_response(response)
-
-        if not parsed:
-            with self._lock:
-                self._stats.llm_failures += 1
-            logger.warning("Failed to parse JSON for %s", business.get("name", "?"))
-            self._update_enrichment_tracking(business["id"])
-            return
-
+    def _validate_ai_response(self, parsed: dict) -> Dict[str, Any]:
+        """Extract and validate fields from AI response."""
         updates: Dict[str, Any] = {}
-
-        # Validate and extract summary (10-500 chars)
         summary = parsed.get("summary", "")
         if isinstance(summary, str) and 10 <= len(summary) <= 500:
             updates["ai_summary"] = summary
-
-        # Validate industry against whitelist
         industry = parsed.get("industry", "")
         if isinstance(industry, str) and industry.lower() in INDUSTRY_WHITELIST:
             updates["industry"] = industry.lower()
-
-        # Validate health score (0-100 integer)
         health_score = parsed.get("health_score")
         if health_score is not None:
             try:
@@ -428,12 +396,27 @@ class EnrichmentPipeline:
                     updates["health_score"] = score
             except (ValueError, TypeError):
                 pass
-
-        # Extract pain points (JSON array)
         pain_points = parsed.get("pain_points", [])
         if isinstance(pain_points, list) and pain_points:
             updates["pain_points"] = pain_points
+        return updates
 
+    def _enrich_single_ai(self, business: dict) -> None:
+        """Enrich a single business with Gemma 26B-A4B."""
+        from forge.enrichment.prompts import build_single_enrichment_prompt
+        prompt = build_single_enrichment_prompt(business)
+        response = self._ollama.generate_simple(prompt, timeout=90.0)
+        logger.debug("Gemma raw output for %s: %s", business.get("name", "?"), response[:200])
+
+        parsed = extract_json_from_response(response)
+        if not parsed:
+            with self._lock:
+                self._stats.llm_failures += 1
+            logger.warning("Failed to parse JSON for %s", business.get("name", "?"))
+            self._update_enrichment_tracking(business["id"])
+            return
+
+        updates = self._validate_ai_response(parsed)
         if updates:
             self._write_enrichment(business["id"], updates, source="gemma")
             with self._lock:
@@ -446,8 +429,6 @@ class EnrichmentPipeline:
         else:
             with self._lock:
                 self._stats.llm_failures += 1
-
-        # Always update tracking
         self._update_enrichment_tracking(business["id"])
 
     # ── Database helpers ─────────────────────────────────────────────────────

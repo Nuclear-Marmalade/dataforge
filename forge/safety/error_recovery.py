@@ -76,6 +76,57 @@ FIELD_VALIDATORS = {
 BATCH_FAILURE_THRESHOLD = 0.10
 
 
+def _check_type(field_name: str, value: Any, rules: Dict) -> tuple[bool, str]:
+    """Check if value matches expected type. Returns (is_valid, error)."""
+    expected_type = rules.get("type")
+    if not expected_type:
+        return True, ""
+
+    if isinstance(expected_type, tuple):
+        if not isinstance(value, expected_type):
+            return False, f"{field_name}: expected {expected_type}, got {type(value).__name__}"
+    elif not isinstance(value, expected_type):
+        if expected_type is int and isinstance(value, (float, str)):
+            try:
+                int(value)
+            except (ValueError, TypeError):
+                return False, f"{field_name}: cannot convert to int"
+        elif expected_type is bool and isinstance(value, int):
+            pass  # int is ok for bool
+        else:
+            return False, f"{field_name}: expected {expected_type.__name__}, got {type(value).__name__}"
+    return True, ""
+
+
+def _check_constraints(field_name: str, value: Any, rules: Dict) -> tuple[bool, str]:
+    """Check length, range, whitelist, and pattern constraints."""
+    if isinstance(value, str):
+        max_len = rules.get("max_length")
+        if max_len and len(value) > max_len:
+            return False, f"{field_name}: length {len(value)} exceeds max {max_len}"
+        min_len = rules.get("min_length")
+        if min_len and len(value) < min_len:
+            return False, f"{field_name}: length {len(value)} below min {min_len}"
+
+    if isinstance(value, (int, float)):
+        min_val = rules.get("min_value")
+        if min_val is not None and value < min_val:
+            return False, f"{field_name}: value {value} below min {min_val}"
+        max_val = rules.get("max_value")
+        if max_val is not None and value > max_val:
+            return False, f"{field_name}: value {value} above max {max_val}"
+
+    whitelist = rules.get("whitelist")
+    if whitelist and isinstance(value, str) and value.lower() not in whitelist:
+        return False, f"{field_name}: '{value}' not in whitelist"
+
+    pattern_fn = rules.get("pattern_check")
+    if pattern_fn and not pattern_fn(value):
+        return False, f"{field_name}: failed pattern check"
+
+    return True, ""
+
+
 def validate_field(field_name: str, value: Any) -> tuple[bool, str]:
     """
     Validate a single field value against its rules.
@@ -86,53 +137,11 @@ def validate_field(field_name: str, value: Any) -> tuple[bool, str]:
     if not rules:
         return True, ""  # No rules = allow
 
-    # Type check
-    expected_type = rules.get("type")
-    if expected_type:
-        if isinstance(expected_type, tuple):
-            if not isinstance(value, expected_type):
-                return False, f"{field_name}: expected {expected_type}, got {type(value).__name__}"
-        elif not isinstance(value, expected_type):
-            # Allow int for bool fields, string for int fields with conversion
-            if expected_type is int and isinstance(value, (float, str)):
-                try:
-                    int(value)
-                except (ValueError, TypeError):
-                    return False, f"{field_name}: cannot convert to int"
-            elif expected_type is bool and isinstance(value, int):
-                pass  # int is ok for bool
-            else:
-                return False, f"{field_name}: expected {expected_type.__name__}, got {type(value).__name__}"
+    ok, err = _check_type(field_name, value, rules)
+    if not ok:
+        return False, err
 
-    # String length checks
-    if isinstance(value, str):
-        max_len = rules.get("max_length")
-        if max_len and len(value) > max_len:
-            return False, f"{field_name}: length {len(value)} exceeds max {max_len}"
-        min_len = rules.get("min_length")
-        if min_len and len(value) < min_len:
-            return False, f"{field_name}: length {len(value)} below min {min_len}"
-
-    # Numeric range checks
-    if isinstance(value, (int, float)):
-        min_val = rules.get("min_value")
-        if min_val is not None and value < min_val:
-            return False, f"{field_name}: value {value} below min {min_val}"
-        max_val = rules.get("max_value")
-        if max_val is not None and value > max_val:
-            return False, f"{field_name}: value {value} above max {max_val}"
-
-    # Whitelist check
-    whitelist = rules.get("whitelist")
-    if whitelist and isinstance(value, str) and value.lower() not in whitelist:
-        return False, f"{field_name}: '{value}' not in whitelist"
-
-    # Pattern check
-    pattern_fn = rules.get("pattern_check")
-    if pattern_fn and not pattern_fn(value):
-        return False, f"{field_name}: failed pattern check"
-
-    return True, ""
+    return _check_constraints(field_name, value, rules)
 
 
 def validate_updates(updates: Dict[str, Any]) -> tuple[Dict[str, Any], List[str]]:
@@ -272,6 +281,70 @@ class EnrichmentLogger:
         self._batch_failures = 0
 
 
+def _fetch_log_entries(
+    cur: Any,
+    start_time: str,
+    end_time: str,
+) -> List[Dict[str, Any]]:
+    """Fetch enrichment log entries for a time range."""
+    cur.execute(
+        """SELECT business_id, field_name, old_value, new_value, created_at
+           FROM enrichment_log
+           WHERE created_at >= %s AND created_at <= %s
+           ORDER BY created_at DESC""",
+        (start_time, end_time),
+    )
+    return cur.fetchall()
+
+
+def _dry_run_summary(entries: List[Any]) -> Dict[str, Any]:
+    """Build a dry-run summary from log entries."""
+    return {
+        "status": "dry_run",
+        "count": len(entries),
+        "affected_businesses": len(set(e["business_id"] for e in entries)),
+        "fields": list(set(e["field_name"] for e in entries)),
+    }
+
+
+def _revert_fields(cur: Any, entries: List[Any]) -> int:
+    """Revert each entry's field to old_value. Returns count reverted."""
+    import re
+
+    ALLOWED = {
+        "email", "industry", "sub_industry", "ai_summary", "health_score",
+        "tech_stack", "ssl_valid", "cms_detected", "site_speed_ms", "pain_points",
+    }
+    rolled_back = 0
+
+    for entry in entries:
+        field = entry["field_name"]
+        if field not in ALLOWED:
+            continue
+        if not re.match(r'^[a-z_]+$', field):
+            logger.error("Invalid field name in rollback: %s", field)
+            continue
+
+        old_val = entry["old_value"]
+        biz_id = entry["business_id"]
+        try:
+            if old_val is None:
+                cur.execute(
+                    f"UPDATE businesses SET {field} = NULL, updated_at = NOW() WHERE id = %s",
+                    (biz_id,),
+                )
+            else:
+                cur.execute(
+                    f"UPDATE businesses SET {field} = %s, updated_at = NOW() WHERE id = %s",
+                    (old_val, biz_id),
+                )
+            rolled_back += 1
+        except Exception as e:
+            logger.error("Rollback failed for %s.%s: %s", biz_id, field, e)
+
+    return rolled_back
+
+
 def rollback_enrichment(
     db_pool: Any,
     start_time: str,
@@ -280,8 +353,6 @@ def rollback_enrichment(
 ) -> Dict[str, Any]:
     """
     Rollback enrichment changes in a timestamp range.
-
-    Reads enrichment_log entries and reverts fields to old_value.
 
     Args:
         db_pool: Database connection pool.
@@ -301,70 +372,17 @@ def rollback_enrichment(
     conn = db_pool.get_connection()
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-
-        cur.execute(
-            """SELECT business_id, field_name, old_value, new_value, created_at
-               FROM enrichment_log
-               WHERE created_at >= %s AND created_at <= %s
-               ORDER BY created_at DESC""",
-            (start_time, end_time),
-        )
-        entries = cur.fetchall()
+        entries = _fetch_log_entries(cur, start_time, end_time)
 
         if not entries:
             return {"status": "no_entries", "count": 0}
-
         if dry_run:
-            return {
-                "status": "dry_run",
-                "count": len(entries),
-                "affected_businesses": len(set(e["business_id"] for e in entries)),
-                "fields": list(set(e["field_name"] for e in entries)),
-            }
+            return _dry_run_summary(entries)
 
-        # Execute rollback
-        rolled_back = 0
-        ALLOWED = {
-            "email", "industry", "sub_industry", "ai_summary", "health_score",
-            "tech_stack", "ssl_valid", "cms_detected", "site_speed_ms", "pain_points",
-        }
-
-        for entry in entries:
-            field = entry["field_name"]
-            if field not in ALLOWED:
-                continue
-
-            import re
-            if not re.match(r'^[a-z_]+$', field):
-                logger.error("Invalid field name in rollback: %s", field)
-                continue
-
-            old_val = entry["old_value"]
-            biz_id = entry["business_id"]
-
-            try:
-                if old_val is None:
-                    cur.execute(
-                        f"UPDATE businesses SET {field} = NULL, updated_at = NOW() WHERE id = %s",
-                        (biz_id,),
-                    )
-                else:
-                    cur.execute(
-                        f"UPDATE businesses SET {field} = %s, updated_at = NOW() WHERE id = %s",
-                        (old_val, biz_id),
-                    )
-                rolled_back += 1
-            except Exception as e:
-                logger.error("Rollback failed for %s.%s: %s", biz_id, field, e)
-
+        rolled_back = _revert_fields(cur, entries)
         conn.commit()
         cur.close()
-
-        return {
-            "status": "rolled_back",
-            "count": rolled_back,
-            "total_entries": len(entries),
-        }
+        return {"status": "rolled_back", "count": rolled_back, "total_entries": len(entries)}
 
     except Exception as e:
         conn.rollback()

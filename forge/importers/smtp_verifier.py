@@ -104,56 +104,45 @@ def _rate_limit() -> None:
 # Domain extraction
 # ---------------------------------------------------------------------------
 
-def extract_domain(website_url: str) -> Optional[str]:
-    """
-    Extract the registrable domain from a website URL.
+_SKIP_DOMAINS = {
+    "facebook.com", "fb.com", "instagram.com", "twitter.com", "x.com",
+    "linkedin.com", "youtube.com", "tiktok.com", "yelp.com",
+    "google.com", "gmail.com", "yahoo.com", "outlook.com",
+    "wix.com", "squarespace.com", "wordpress.com", "godaddy.com",
+    "blogspot.com", "tumblr.com", "pinterest.com",
+}
 
-    Handles URLs with and without scheme, strips www prefix.
-    Returns None if the URL is unparseable or clearly not a domain.
-    """
+
+def _normalize_host(url: str) -> Optional[str]:
+    """Parse and normalize a URL to its hostname. Returns None if invalid."""
+    if not url.startswith(("http://", "https://")):
+        url = "http://" + url
+    try:
+        host = urlparse(url).hostname
+    except Exception:
+        return None
+    if not host:
+        return None
+    host = host.lower().strip(".")
+    if host.startswith("www."):
+        host = host[4:]
+    if "." not in host or " " in host:
+        return None
+    if all(p.isdigit() for p in host.split(".")):
+        return None
+    return host
+
+
+def extract_domain(website_url: str) -> Optional[str]:
+    """Extract the registrable domain from a website URL."""
     url = website_url.strip()
     if not url:
         return None
-
-    # Ensure scheme so urlparse works
-    if not url.startswith(("http://", "https://")):
-        url = "http://" + url
-
-    try:
-        parsed = urlparse(url)
-        host = parsed.hostname
-    except Exception:
-        return None
-
+    host = _normalize_host(url)
     if not host:
         return None
-
-    host = host.lower().strip(".")
-
-    # Strip www prefix
-    if host.startswith("www."):
-        host = host[4:]
-
-    # Basic sanity: must have at least one dot, no spaces
-    if "." not in host or " " in host:
+    if host in _SKIP_DOMAINS:
         return None
-
-    # Skip IP addresses
-    parts = host.split(".")
-    if all(p.isdigit() for p in parts):
-        return None
-
-    # Skip common non-business domains
-    skip_domains = {
-        "facebook.com", "fb.com", "instagram.com", "twitter.com", "x.com",
-        "linkedin.com", "youtube.com", "tiktok.com", "yelp.com",
-        "google.com", "gmail.com", "yahoo.com", "outlook.com",
-        "wix.com", "squarespace.com", "wordpress.com", "godaddy.com",
-        "blogspot.com", "tumblr.com", "pinterest.com",
-    }
-    if host in skip_domains:
-        return None
-
     return host
 
 
@@ -400,10 +389,118 @@ def verify_business(business_id: str, website_url: str) -> Optional[Tuple[str, s
 # Main processing loop
 # ---------------------------------------------------------------------------
 
+def _process_batch(
+    batch: List[Tuple[str, str]],
+    workers: int,
+    db,
+) -> Tuple[int, int]:
+    """Process a batch of businesses with concurrent SMTP verification.
+
+    Returns (batch_found, batch_written).
+    """
+    batch_found = 0
+    batch_written = 0
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {}
+        for business_id, website_url in batch:
+            future = executor.submit(verify_business, business_id, website_url)
+            futures[future] = business_id
+
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+                if result is not None:
+                    bid, verified_email = result
+                    batch_found += 1
+                    try:
+                        if write_email(db, bid, verified_email):
+                            batch_written += 1
+                            logger.debug("Wrote email %s for business %s", verified_email, bid)
+                    except Exception as e:
+                        logger.warning("DB error writing email for business %s: %s", bid, e)
+            except Exception as e:
+                logger.debug("Worker error for business %s: %s", futures[future], e)
+
+    return batch_found, batch_written
+
+
+def _report_progress(total_processed: int, total_found: int, total_written: int, start_time: float, last_id: str) -> None:
+    """Log progress statistics."""
+    elapsed = time.time() - start_time
+    rate = total_processed / elapsed if elapsed > 0 else 0
+    logger.info(
+        "Progress: %d processed | %d emails found | %d written | "
+        "%.1f rec/sec | last_id=%s | MX cache=%d | catch-all cache=%d",
+        total_processed, total_found, total_written,
+        rate, last_id, len(_mx_cache), len(_catchall_cache),
+    )
+
+
+def _report_final(total_processed: int, total_found: int, total_written: int, start_time: float) -> None:
+    """Log final summary statistics."""
+    elapsed = time.time() - start_time
+    logger.info(
+        "=== SMTP Verification Complete ===\n"
+        "  Total processed: %d\n"
+        "  Emails found:    %d\n"
+        "  Emails written:  %d\n"
+        "  MX domains cached: %d\n"
+        "  Catch-all domains: %d\n"
+        "  Elapsed: %.1f seconds (%.1f rec/sec)",
+        total_processed, total_found, total_written,
+        len(_mx_cache),
+        sum(1 for v in _catchall_cache.values() if v),
+        elapsed,
+        total_processed / elapsed if elapsed > 0 else 0,
+    )
+
+
+def _verification_loop(db, last_id: str, limit: Optional[int], workers: int) -> Tuple[str, int, int, int]:
+    """Run the main verification loop over batches.
+
+    Returns (last_id, total_processed, total_found, total_written).
+    """
+    total_processed = 0
+    total_found = 0
+    total_written = 0
+    last_checkpoint_count = 0
+    start_time = time.time()
+
+    while True:
+        if limit and total_processed >= limit:
+            logger.info("Reached processing limit of %d records", limit)
+            break
+
+        batch = fetch_batch(db, last_id)
+        if not batch:
+            logger.info("No more records to process")
+            break
+
+        if limit:
+            remaining = limit - total_processed
+            if remaining < len(batch):
+                batch = batch[:remaining]
+
+        batch_found, batch_written = _process_batch(batch, workers, db)
+        total_found += batch_found
+        total_written += batch_written
+        last_id = batch[-1][0]
+        total_processed += len(batch)
+
+        if total_processed - last_checkpoint_count >= CHECKPOINT_INTERVAL:
+            save_checkpoint(last_id)
+            last_checkpoint_count = total_processed
+            logger.info("Checkpoint saved at id=%s", last_id)
+
+        if total_processed % 1000 == 0 or total_processed == len(batch):
+            _report_progress(total_processed, total_found, total_written, start_time, last_id)
+
+    return last_id, total_processed, total_found, total_written
+
+
 def run(resume: bool = False, limit: Optional[int] = None, workers: int = 5, db_path: Optional[str] = None) -> None:
-    """
-    Main entry point. Processes businesses in batches with concurrent verification.
-    """
+    """Main entry point for SMTP email verification."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -422,111 +519,17 @@ def run(resume: bool = False, limit: Optional[int] = None, workers: int = 5, db_
 
     db = _get_forgedb(db_path)
     logger.info("Connected to database (%s)", "PostgreSQL" if db.is_postgres else "SQLite")
-
-    total_processed = 0
-    total_found = 0
-    total_written = 0
     start_time = time.time()
-    last_checkpoint_count = 0
 
     try:
-        while True:
-            # Check limit
-            if limit and total_processed >= limit:
-                logger.info("Reached processing limit of %d records", limit)
-                break
-
-            # Fetch next batch
-            batch = fetch_batch(db, last_id)
-            if not batch:
-                logger.info("No more records to process")
-                break
-
-            # Trim batch to stay within limit
-            if limit:
-                remaining = limit - total_processed
-                if remaining < len(batch):
-                    batch = batch[:remaining]
-
-            batch_found = 0
-            batch_written = 0
-
-            # Process batch with thread pool
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                futures = {}
-                for business_id, website_url in batch:
-                    future = executor.submit(verify_business, business_id, website_url)
-                    futures[future] = business_id
-
-                for future in as_completed(futures):
-                    try:
-                        result = future.result()
-                        if result is not None:
-                            bid, verified_email = result
-                            batch_found += 1
-                            total_found += 1
-
-                            # Write to database
-                            try:
-                                if write_email(db, bid, verified_email):
-                                    batch_written += 1
-                                    total_written += 1
-                                    logger.debug(
-                                        "Wrote email %s for business %s",
-                                        verified_email, bid,
-                                    )
-                            except Exception as e:
-                                logger.warning(
-                                    "DB error writing email for business %s: %s",
-                                    bid, e,
-                                )
-                    except Exception as e:
-                        logger.debug("Worker error for business %d: %s", futures[future], e)
-
-            # Update pagination cursor
-            last_id = batch[-1][0]  # Last business ID in this batch
-            total_processed += len(batch)
-
-            # Save checkpoint periodically
-            if total_processed - last_checkpoint_count >= CHECKPOINT_INTERVAL:
-                save_checkpoint(last_id)
-                last_checkpoint_count = total_processed
-                logger.info("Checkpoint saved at id=%s", last_id)
-
-            # Log progress every 1000 records
-            if total_processed % 1000 == 0 or total_processed == len(batch):
-                elapsed = time.time() - start_time
-                rate = total_processed / elapsed if elapsed > 0 else 0
-                logger.info(
-                    "Progress: %d processed | %d emails found | %d written | "
-                    "%.1f rec/sec | last_id=%s | MX cache=%d | catch-all cache=%d",
-                    total_processed, total_found, total_written,
-                    rate, last_id, len(_mx_cache), len(_catchall_cache),
-                )
-
+        last_id, total_processed, total_found, total_written = _verification_loop(db, last_id, limit, workers)
     except KeyboardInterrupt:
+        total_processed = total_found = total_written = 0
         logger.info("Interrupted by user")
     finally:
-        # Always save final checkpoint
         save_checkpoint(last_id)
         logger.info("Final checkpoint saved at id=%s", last_id)
-
-        elapsed = time.time() - start_time
-        logger.info(
-            "=== SMTP Verification Complete ===\n"
-            "  Total processed: %d\n"
-            "  Emails found:    %d\n"
-            "  Emails written:  %d\n"
-            "  MX domains cached: %d\n"
-            "  Catch-all domains: %d\n"
-            "  Elapsed: %.1f seconds (%.1f rec/sec)",
-            total_processed, total_found, total_written,
-            len(_mx_cache),
-            sum(1 for v in _catchall_cache.values() if v),
-            elapsed,
-            total_processed / elapsed if elapsed > 0 else 0,
-        )
-
+        _report_final(total_processed, total_found, total_written, start_time)
         db.close()
 
 
