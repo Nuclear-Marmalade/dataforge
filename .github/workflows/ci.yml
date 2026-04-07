@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Lint
+        run: ruff check forge/
+
+      - name: Format check
+        run: ruff format --check forge/
+
+      - name: Type check
+        run: mypy forge/
+
+      - name: Tests
+        run: pytest forge/tests/ -v --tb=short
+
+      - name: Coverage
+        run: |
+          coverage run --source=forge -m pytest forge/tests/
+          coverage report --skip-empty
