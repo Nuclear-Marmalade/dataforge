@@ -64,6 +64,7 @@ forge = "forge.cli:main"
 python_version = "3.9"
 warn_unused_configs = true
 exclude = ["build", "dist", ".venv"]
+follow_imports = "silent"
 
 [[tool.mypy.overrides]]
 module = ["psycopg2.*", "duckdb.*", "anthropic.*", "aiohttp.*", "aiolimiter.*", "httpx.*"]
