@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}Discover — FORGE{% endblock %}
+
+{% block content %}
+<div class="space-y-8">
+    <!-- Header -->
+    <div>
+        <h1 class="text-2xl font-bold text-white">Discover Businesses</h1>
+        <p class="text-gray-400 mt-1">Search Overture Maps for businesses by ZIP code and industry</p>
+    </div>
+
+    <!-- Search Form -->
+    <div class="forge-card">
+        <form hx-post="/api/discover"
+              hx-target="#discover-results"
+              hx-swap="innerHTML"
+              hx-indicator="#discover-spinner"
+              class="space-y-6">
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                <!-- ZIP Code -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-300 mb-2">ZIP Code</label>
+                    <input type="text"
+                           name="zip_code"
+                           placeholder="e.g. 33602"
+                           pattern="[0-9]{5}"
+                           required
+                           class="forge-input"
+                           maxlength="5">
+                </div>
+
+                <!-- Industry -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-300 mb-2">Industry</label>
+                    <select name="industry" class="forge-select">
+                        <option value="">All Industries</option>
+                        {% for ind in industries %}
+                        <option value="{{ ind }}">{{ ind | replace('-', ' ') | title }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <!-- Radius -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-300 mb-2">
+                        Radius: <span id="radius-val">10</span> miles
+                    </label>
+                    <input type="range"
+                           name="radius"
+                           min="1"
+                           max="50"
+                           value="10"
+                           oninput="document.getElementById('radius-val').textContent = this.value">
+                </div>
+
+                <!-- Limit -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-300 mb-2">Max Results</label>
+                    <input type="number"
+                           name="limit"
+                           value="100"
+                           min="1"
+                           max="10000"
+                           class="forge-input">
+                </div>
+            </div>
+
+            <div class="flex items-center gap-4">
+                <button type="submit" class="forge-btn">
+                    <span class="flex items-center gap-2">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+                        Search
+                    </span>
+                </button>
+                <span id="discover-spinner" class="htmx-indicator text-amber-400 text-sm">
+                    Searching...
+                </span>
+            </div>
+        </form>
+    </div>
+
+    <!-- Results -->
+    <div id="discover-results">
+        <div class="text-center text-gray-500 py-12">
+            <svg class="w-16 h-16 mx-auto mb-4 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+            <p class="text-lg">Enter a ZIP code to discover businesses</p>
+            <p class="text-sm mt-1">Results will appear here</p>
+        </div>
+    </div>
+</div>
+{% endblock %}

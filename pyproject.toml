@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "forge-enrichment"
+version = "1.0.0"
+description = "Free open-source business data enrichment engine. The open-source alternative to Apollo, ZoomInfo, and Clearbit."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+authors = [
+    {name = "Nuclear Marmalade", email = "hello@nuclearmarmalade.com"},
+]
+keywords = ["data-enrichment", "business-data", "web-scraping", "email-extraction", "ollama", "gemma"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+    "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
+]
+
+dependencies = [
+    "psycopg2-binary>=2.9",
+    "aiohttp>=3.9",
+    "aiolimiter>=1.1",
+    "httpx>=0.25",
+    "dnspython>=2.4",
+    "anthropic>=0.25",
+    "duckdb>=1.0",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
+    "sse-starlette>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "black>=23.0",
+    "ruff>=0.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/ghealysr/forge"
+Documentation = "https://github.com/ghealysr/forge#readme"
+Repository = "https://github.com/ghealysr/forge"
+Issues = "https://github.com/ghealysr/forge/issues"
+
+[project.scripts]
+forge = "forge.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["forge*"]
+
+[tool.setuptools.package-data]
+"forge.dashboard" = ["templates/*", "static/*"]
+"forge.discovery" = ["*.py"]

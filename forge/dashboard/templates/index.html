@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}FORGE Dashboard{% endblock %}
+
+{% block content %}
+<div class="space-y-8">
+    <!-- Header -->
+    <div>
+        <h1 class="text-2xl font-bold text-white">Dashboard</h1>
+        <p class="text-gray-400 mt-1">Overview of your FORGE data pipeline</p>
+    </div>
+
+    <!-- Stat Cards (polled every 5s) -->
+    <div id="stats-container"
+         hx-get="/api/stats"
+         hx-trigger="load, every 5s"
+         hx-swap="innerHTML"
+         hx-target="#stats-grid">
+        <div id="stats-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
+            <!-- Total Records -->
+            <div class="forge-card">
+                <p class="text-sm text-gray-400 mb-1">Total Records</p>
+                <p class="forge-stat">{{ stats.total_records | default(0) }}</p>
+                <p class="text-xs text-gray-500 mt-2">businesses in database</p>
+            </div>
+            <!-- With Email -->
+            <div class="forge-card">
+                <p class="text-sm text-gray-400 mb-1">With Email</p>
+                <p class="forge-stat">{{ stats.with_email | default(0) }}</p>
+                <p class="text-xs text-gray-500 mt-2">
+                    {% if stats.total_records %}{{ "%.1f" | format(stats.with_email / stats.total_records * 100) }}%{% else %}0%{% endif %} coverage
+                </p>
+            </div>
+            <!-- With Tech Stack -->
+            <div class="forge-card">
+                <p class="text-sm text-gray-400 mb-1">With Tech Stack</p>
+                <p class="forge-stat">{{ stats.with_tech_stack | default(0) }}</p>
+                <p class="text-xs text-gray-500 mt-2">
+                    {% if stats.total_records %}{{ "%.1f" | format(stats.with_tech_stack / stats.total_records * 100) }}%{% else %}0%{% endif %} coverage
+                </p>
+            </div>
+            <!-- With NPI -->
+            <div class="forge-card">
+                <p class="text-sm text-gray-400 mb-1">With NPI</p>
+                <p class="forge-stat">{{ stats.with_npi | default(0) }}</p>
+                <p class="text-xs text-gray-500 mt-2">healthcare providers</p>
+            </div>
+            <!-- Enriched Today -->
+            <div class="forge-card">
+                <p class="text-sm text-gray-400 mb-1">Enriched Today</p>
+                <p class="forge-stat">{{ stats.enriched_today | default(0) }}</p>
+                <p class="text-xs text-gray-500 mt-2">in last 24 hours</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Quick Actions -->
+    <div>
+        <h2 class="text-lg font-semibold text-white mb-4">Quick Actions</h2>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <a href="/import" class="forge-card hover:border-amber-500/50 transition group">
+                <div class="flex items-center gap-4">
+                    <div class="w-12 h-12 rounded-lg bg-amber-500/10 flex items-center justify-center group-hover:bg-amber-500/20 transition">
+                        <svg class="w-6 h-6 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
+                    </div>
+                    <div>
+                        <p class="font-semibold text-white">Upload CSV</p>
+                        <p class="text-sm text-gray-400">Import business records</p>
+                    </div>
+                </div>
+            </a>
+            <a href="/enrich" class="forge-card hover:border-amber-500/50 transition group">
+                <div class="flex items-center gap-4">
+                    <div class="w-12 h-12 rounded-lg bg-amber-500/10 flex items-center justify-center group-hover:bg-amber-500/20 transition">
+                        <svg class="w-6 h-6 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                    </div>
+                    <div>
+                        <p class="font-semibold text-white">Start Enrichment</p>
+                        <p class="text-sm text-gray-400">Enrich business data</p>
+                    </div>
+                </div>
+            </a>
+            <a href="/export" class="forge-card hover:border-amber-500/50 transition group">
+                <div class="flex items-center gap-4">
+                    <div class="w-12 h-12 rounded-lg bg-amber-500/10 flex items-center justify-center group-hover:bg-amber-500/20 transition">
+                        <svg class="w-6 h-6 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l4 4m0 0l4-4m-4 4V4"/></svg>
+                    </div>
+                    <div>
+                        <p class="font-semibold text-white">Export Data</p>
+                        <p class="text-sm text-gray-400">Download enriched records</p>
+                    </div>
+                </div>
+            </a>
+        </div>
+    </div>
+
+    <!-- Last Enriched -->
+    <div class="forge-card">
+        <h3 class="text-sm font-semibold text-gray-400 mb-2">Last Enrichment</h3>
+        <p class="text-gray-300">{{ stats.last_enriched or "No enrichment runs yet" }}</p>
+    </div>
+</div>
+{% endblock %}

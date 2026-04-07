@@ -1,0 +1,3 @@
+recursive-include forge/dashboard/templates *
+recursive-include forge/dashboard/static *
+recursive-include forge/discovery *.py

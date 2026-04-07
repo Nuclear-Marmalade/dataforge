@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}Export — FORGE{% endblock %}
+
+{% block content %}
+<div class="space-y-8">
+    <!-- Header -->
+    <div>
+        <h1 class="text-2xl font-bold text-white">Export Data</h1>
+        <p class="text-gray-400 mt-1">Download enriched business data as CSV or JSON</p>
+    </div>
+
+    <!-- Filter Options -->
+    <div class="forge-card space-y-6">
+        <h3 class="text-lg font-semibold text-white">Export Options</h3>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <!-- Filter Preset -->
+            <div>
+                <label class="block text-sm font-medium text-gray-300 mb-2">Filter</label>
+                <select id="export-filter" class="forge-select">
+                    <option value="all">All Records</option>
+                    <option value="with_email">With Email Only</option>
+                    <option value="with_tech">With Tech Stack</option>
+                    <option value="enriched">Enriched Only</option>
+                    <option value="with_website">With Website</option>
+                    <option value="with_npi">With NPI Number</option>
+                </select>
+            </div>
+
+            <!-- Format -->
+            <div>
+                <label class="block text-sm font-medium text-gray-300 mb-2">Format</label>
+                <select id="export-format" class="forge-select">
+                    <option value="csv">CSV</option>
+                    <option value="json">JSON</option>
+                </select>
+            </div>
+
+            <!-- Download -->
+            <div class="flex items-end">
+                <a id="download-btn"
+                   href="/api/export/csv?filter=all&format=csv"
+                   class="forge-btn w-full text-center">
+                    <span class="flex items-center justify-center gap-2">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l4 4m0 0l4-4m-4 4V4"/></svg>
+                        Download
+                    </span>
+                </a>
+            </div>
+        </div>
+    </div>
+
+    <!-- Preview -->
+    <div class="forge-card">
+        <div class="flex items-center justify-between mb-4">
+            <h3 class="text-lg font-semibold text-white">Preview</h3>
+            <button class="forge-btn-secondary text-sm"
+                    hx-get="/api/export/csv?filter=all&format=json&preview=true&limit=10"
+                    hx-target="#preview-table"
+                    hx-swap="innerHTML"
+                    hx-indicator="#preview-spinner"
+                    onclick="this.setAttribute('hx-get', buildPreviewUrl()); htmx.process(this); htmx.trigger(this, 'click');">
+                Load Preview
+            </button>
+            <span id="preview-spinner" class="htmx-indicator text-amber-400 text-sm">Loading...</span>
+        </div>
+        <div id="preview-table" class="overflow-x-auto">
+            <p class="text-gray-500 text-sm text-center py-8">Click "Load Preview" to see the first 10 rows</p>
+        </div>
+    </div>
+</div>
+
+<script>
+    function updateDownloadUrl() {
+        const filter = document.getElementById('export-filter').value;
+        const format = document.getElementById('export-format').value;
+        const params = new URLSearchParams({ filter, format });
+        document.getElementById('download-btn').href = '/api/export/csv?' + params.toString();
+    }
+
+    function buildPreviewUrl() {
+        const filter = document.getElementById('export-filter').value;
+        const params = new URLSearchParams({ filter, format: 'json', preview: 'true', limit: '10' });
+        return '/api/export/csv?' + params.toString();
+    }
+
+    // Update download URL when filter or format changes
+    document.getElementById('export-filter').addEventListener('change', updateDownloadUrl);
+    document.getElementById('export-format').addEventListener('change', updateDownloadUrl);
+</script>
+{% endblock %}

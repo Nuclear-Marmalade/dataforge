@@ -1,0 +1,154 @@
+{% extends "base.html" %}
+{% block title %}Settings — FORGE{% endblock %}
+
+{% block content %}
+<div class="space-y-8">
+    <!-- Header -->
+    <div>
+        <h1 class="text-2xl font-bold text-white">Settings</h1>
+        <p class="text-gray-400 mt-1">Configure FORGE database, AI, and enrichment settings</p>
+    </div>
+
+    <form hx-post="/api/settings"
+          hx-target="#settings-result"
+          hx-swap="innerHTML"
+          hx-indicator="#settings-spinner"
+          class="space-y-6">
+
+        <!-- Database Section -->
+        <div class="forge-card">
+            <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                <svg class="w-5 h-5 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4"/></svg>
+                Database
+            </h3>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-300 mb-2">Backend</label>
+                    <select name="db_backend" class="forge-select">
+                        <option value="sqlite" {% if config.db_backend == 'sqlite' %}selected{% endif %}>SQLite</option>
+                        <option value="postgresql" {% if config.db_backend == 'postgresql' %}selected{% endif %}>PostgreSQL</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-300 mb-2">Path / Host</label>
+                    <input type="text"
+                           name="db_path"
+                           value="{{ config.db_path }}"
+                           class="forge-input"
+                           placeholder="forge.db or localhost">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-300 mb-2">Port</label>
+                    <input type="number"
+                           name="db_port"
+                           value="{{ config.db_port }}"
+                           class="forge-input"
+                           placeholder="5432">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-300 mb-2">Database Name</label>
+                    <input type="text"
+                           name="db_name"
+                           value="{{ config.db_name }}"
+                           class="forge-input"
+                           placeholder="forge">
+                </div>
+            </div>
+        </div>
+
+        <!-- AI Section -->
+        <div class="forge-card">
+            <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                <svg class="w-5 h-5 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+                AI Configuration
+            </h3>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-300 mb-2">Adapter</label>
+                    <select name="adapter" class="forge-select">
+                        <option value="auto" {% if config.adapter == 'auto' %}selected{% endif %}>Auto-detect</option>
+                        <option value="claude" {% if config.adapter == 'claude' %}selected{% endif %}>Claude</option>
+                        <option value="ollama" {% if config.adapter == 'ollama' %}selected{% endif %}>Ollama</option>
+                        <option value="none" {% if config.adapter == 'none' %}selected{% endif %}>None (email only)</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-300 mb-2">API Key</label>
+                    <input type="password"
+                           name="anthropic_api_key"
+                           value="{{ config.anthropic_api_key[:4] + '****' if config.anthropic_api_key else '' }}"
+                           class="forge-input"
+                           placeholder="sk-ant-...">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-300 mb-2">Ollama URL</label>
+                    <input type="text"
+                           name="ollama_url"
+                           value="{{ config.ollama_url }}"
+                           class="forge-input"
+                           placeholder="http://localhost:11434">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-300 mb-2">Model</label>
+                    <input type="text"
+                           name="ollama_model"
+                           value="{{ config.ollama_model }}"
+                           class="forge-input"
+                           placeholder="gemma4:26b">
+                </div>
+            </div>
+        </div>
+
+        <!-- Enrichment Section -->
+        <div class="forge-card">
+            <h3 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                <svg class="w-5 h-5 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                Enrichment
+            </h3>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-300 mb-2">Workers</label>
+                    <input type="number"
+                           name="workers"
+                           value="{{ config.workers }}"
+                           min="1"
+                           max="500"
+                           class="forge-input">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-300 mb-2">Batch Size</label>
+                    <input type="number"
+                           name="batch_size"
+                           value="{{ config.batch_size }}"
+                           min="1"
+                           max="50"
+                           class="forge-input">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-300 mb-2">Rate Limit (req/s)</label>
+                    <input type="number"
+                           name="rate_limit"
+                           value="{{ config.rate_limit }}"
+                           min="1"
+                           step="10"
+                           class="forge-input">
+                </div>
+            </div>
+        </div>
+
+        <!-- Save -->
+        <div class="flex items-center gap-4">
+            <button type="submit" class="forge-btn">
+                <span class="flex items-center gap-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+                    Save Settings
+                </span>
+            </button>
+            <span id="settings-spinner" class="htmx-indicator text-amber-400 text-sm">Saving...</span>
+        </div>
+    </form>
+
+    <!-- Result feedback -->
+    <div id="settings-result"></div>
+</div>
+{% endblock %}

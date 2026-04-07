@@ -1,0 +1,142 @@
+{% extends "base.html" %}
+{% block title %}Enrich — FORGE{% endblock %}
+
+{% block content %}
+<div class="space-y-8">
+    <!-- Header -->
+    <div>
+        <h1 class="text-2xl font-bold text-white">Enrichment Pipeline</h1>
+        <p class="text-gray-400 mt-1">Run email extraction and AI enrichment on your business records</p>
+    </div>
+
+    <!-- Controls -->
+    <div class="forge-card space-y-6">
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <!-- Mode Selector -->
+            <div>
+                <label class="block text-sm font-medium text-gray-300 mb-2">Enrichment Mode</label>
+                <select id="enrich-mode" class="forge-select">
+                    <option value="both">Both (Email + AI)</option>
+                    <option value="email">Email Only</option>
+                    <option value="ai">AI Only</option>
+                </select>
+            </div>
+
+            <!-- Workers Slider -->
+            <div>
+                <label class="block text-sm font-medium text-gray-300 mb-2">
+                    Workers: <span id="workers-val">50</span>
+                </label>
+                <input type="range"
+                       id="enrich-workers"
+                       min="10"
+                       max="200"
+                       value="50"
+                       step="10"
+                       oninput="document.getElementById('workers-val').textContent = this.value">
+            </div>
+
+            <!-- Actions -->
+            <div class="flex items-end gap-3">
+                <button id="start-btn"
+                        class="forge-btn flex-1"
+                        hx-post="/api/enrich/start"
+                        hx-vals='js:{mode: document.getElementById("enrich-mode").value, workers: document.getElementById("enrich-workers").value}'
+                        hx-target="#enrich-status"
+                        hx-swap="innerHTML">
+                    Start Enrichment
+                </button>
+                <button id="stop-btn"
+                        class="forge-btn-danger flex-1"
+                        hx-post="/api/enrich/stop"
+                        hx-target="#enrich-status"
+                        hx-swap="innerHTML">
+                    Stop
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Status area -->
+    <div id="enrich-status"></div>
+
+    <!-- Live Stats (polls when enrichment is active) -->
+    <div id="enrich-live-stats"
+         hx-get="/api/enrich/status"
+         hx-trigger="every 3s"
+         hx-swap="innerHTML">
+        <!-- Stats injected here -->
+    </div>
+
+    <!-- Stats Grid -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div class="forge-card text-center">
+            <p class="text-sm text-gray-400">Processed</p>
+            <p id="stat-processed" class="text-3xl font-bold text-amber-400 mt-1">0</p>
+        </div>
+        <div class="forge-card text-center">
+            <p class="text-sm text-gray-400">Emails Found</p>
+            <p id="stat-emails" class="text-3xl font-bold text-green-400 mt-1">0</p>
+        </div>
+        <div class="forge-card text-center">
+            <p class="text-sm text-gray-400">Tech Stacks</p>
+            <p id="stat-techstacks" class="text-3xl font-bold text-blue-400 mt-1">0</p>
+        </div>
+        <div class="forge-card text-center">
+            <p class="text-sm text-gray-400">Rate</p>
+            <p id="stat-rate" class="text-3xl font-bold text-purple-400 mt-1">0/hr</p>
+        </div>
+    </div>
+
+    <!-- Progress Bar -->
+    <div class="forge-card">
+        <div class="flex justify-between text-sm text-gray-400 mb-2">
+            <span>Enrichment Progress</span>
+            <span id="progress-pct">0%</span>
+        </div>
+        <div class="forge-progress">
+            <div id="progress-bar" class="forge-progress-bar" style="width: 0%"></div>
+        </div>
+    </div>
+
+    <!-- Log Output -->
+    <div>
+        <h3 class="text-sm font-semibold text-gray-400 mb-2">Activity Log</h3>
+        <div id="enrich-log" class="forge-log">
+            <p class="text-gray-600">Waiting for enrichment to start...</p>
+        </div>
+    </div>
+</div>
+
+<script>
+    // Update stats from JSON polling response
+    document.body.addEventListener('htmx:afterRequest', function(evt) {
+        if (evt.detail.pathInfo && evt.detail.pathInfo.requestPath === '/api/enrich/status') {
+            try {
+                const data = JSON.parse(evt.detail.xhr.responseText);
+                if (data.stats) {
+                    document.getElementById('stat-processed').textContent = (data.stats.total_processed || 0).toLocaleString();
+                    document.getElementById('stat-emails').textContent = (data.stats.emails_found || 0).toLocaleString();
+                    document.getElementById('stat-techstacks').textContent = (data.stats.tech_stacks_found || 0).toLocaleString();
+                    document.getElementById('stat-rate').textContent = Math.round(data.stats.rate_per_hour || 0).toLocaleString() + '/hr';
+
+                    const pct = data.stats.progress_pct || 0;
+                    document.getElementById('progress-pct').textContent = pct.toFixed(1) + '%';
+                    document.getElementById('progress-bar').style.width = pct + '%';
+
+                    if (data.stats.log_messages) {
+                        var logEl = document.getElementById('enrich-log');
+                        logEl.innerHTML = '';
+                        data.stats.log_messages.forEach(function(m) {
+                            var p = document.createElement('p');
+                            p.textContent = m;
+                            logEl.appendChild(p);
+                        });
+                        logEl.scrollTop = logEl.scrollHeight;
+                    }
+                }
+            } catch(e) { /* ignore parse errors from non-JSON responses */ }
+        }
+    });
+</script>
+{% endblock %}

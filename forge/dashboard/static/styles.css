@@ -1,0 +1,222 @@
+/* FORGE Dashboard Custom Styles */
+
+/* Gradient background for hero sections */
+.forge-gradient {
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+}
+
+/* Card component */
+.forge-card {
+    background-color: rgb(17 24 39); /* gray-900 */
+    border-radius: 0.75rem;
+    border: 1px solid rgb(31 41 55); /* gray-800 */
+    padding: 1.5rem;
+}
+
+/* Large stat number */
+.forge-stat {
+    font-size: 2.25rem;
+    font-weight: 700;
+    color: rgb(251 191 35); /* amber-400 */
+}
+
+/* Accent color */
+.forge-accent {
+    color: #F1C609;
+}
+
+/* Primary action button */
+.forge-btn {
+    background-color: rgb(245 158 11); /* amber-500 */
+    color: black;
+    font-weight: 700;
+    padding: 0.5rem 1rem;
+    border-radius: 0.5rem;
+    transition: background-color 0.2s;
+    cursor: pointer;
+    border: none;
+    display: inline-block;
+    text-decoration: none;
+    text-align: center;
+}
+.forge-btn:hover {
+    background-color: rgb(217 119 6); /* amber-600 */
+}
+
+/* Danger button */
+.forge-btn-danger {
+    background-color: rgb(220 38 38); /* red-600 */
+    color: white;
+    font-weight: 700;
+    padding: 0.5rem 1rem;
+    border-radius: 0.5rem;
+    transition: background-color 0.2s;
+    cursor: pointer;
+    border: none;
+}
+.forge-btn-danger:hover {
+    background-color: rgb(185 28 28); /* red-700 */
+}
+
+/* Secondary button */
+.forge-btn-secondary {
+    background-color: rgb(55 65 81); /* gray-700 */
+    color: rgb(229 231 235); /* gray-200 */
+    font-weight: 600;
+    padding: 0.5rem 1rem;
+    border-radius: 0.5rem;
+    transition: background-color 0.2s;
+    cursor: pointer;
+    border: 1px solid rgb(75 85 99); /* gray-600 */
+}
+.forge-btn-secondary:hover {
+    background-color: rgb(75 85 99); /* gray-600 */
+}
+
+/* Form inputs */
+.forge-input {
+    background-color: rgb(17 24 39); /* gray-900 */
+    border: 1px solid rgb(55 65 81); /* gray-700 */
+    color: rgb(243 244 246); /* gray-100 */
+    padding: 0.5rem 0.75rem;
+    border-radius: 0.5rem;
+    width: 100%;
+    outline: none;
+    transition: border-color 0.2s;
+}
+.forge-input:focus {
+    border-color: rgb(245 158 11); /* amber-500 */
+    box-shadow: 0 0 0 1px rgb(245 158 11);
+}
+
+/* Select dropdown */
+.forge-select {
+    background-color: rgb(17 24 39);
+    border: 1px solid rgb(55 65 81);
+    color: rgb(243 244 246);
+    padding: 0.5rem 0.75rem;
+    border-radius: 0.5rem;
+    width: 100%;
+    outline: none;
+    cursor: pointer;
+}
+
+/* Progress bar */
+.forge-progress {
+    background-color: rgb(31 41 55); /* gray-800 */
+    border-radius: 9999px;
+    overflow: hidden;
+    height: 0.75rem;
+}
+.forge-progress-bar {
+    background: linear-gradient(90deg, #F1C609, #f59e0b);
+    height: 100%;
+    transition: width 0.5s ease;
+    border-radius: 9999px;
+}
+
+/* Nav link */
+.nav-link {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.625rem 1rem;
+    border-radius: 0.5rem;
+    color: rgb(156 163 175); /* gray-400 */
+    text-decoration: none;
+    transition: all 0.2s;
+    font-size: 0.875rem;
+    font-weight: 500;
+}
+.nav-link:hover {
+    background-color: rgb(31 41 55); /* gray-800 */
+    color: rgb(243 244 246); /* gray-100 */
+}
+.nav-link.active {
+    background-color: rgba(245, 158, 11, 0.1);
+    color: #F1C609;
+    border-left: 2px solid #F1C609;
+}
+
+/* Drag and drop zone */
+.drop-zone {
+    border: 2px dashed rgb(75 85 99);
+    border-radius: 0.75rem;
+    padding: 3rem;
+    text-align: center;
+    transition: all 0.2s;
+    cursor: pointer;
+}
+.drop-zone:hover,
+.drop-zone.dragover {
+    border-color: #F1C609;
+    background-color: rgba(245, 158, 11, 0.05);
+}
+
+/* Log output area */
+.forge-log {
+    background-color: rgb(3 7 18); /* gray-950 */
+    border: 1px solid rgb(31 41 55);
+    border-radius: 0.5rem;
+    padding: 1rem;
+    font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+    font-size: 0.8125rem;
+    line-height: 1.5;
+    max-height: 300px;
+    overflow-y: auto;
+    color: rgb(156 163 175);
+}
+
+/* Table styles */
+.forge-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+.forge-table th {
+    background-color: rgb(17 24 39);
+    padding: 0.75rem 1rem;
+    text-align: left;
+    font-weight: 600;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: rgb(156 163 175);
+    border-bottom: 1px solid rgb(55 65 81);
+}
+.forge-table td {
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid rgb(31 41 55);
+    font-size: 0.875rem;
+}
+.forge-table tr:hover td {
+    background-color: rgb(17 24 39);
+}
+
+/* Slider styling */
+input[type="range"] {
+    -webkit-appearance: none;
+    width: 100%;
+    height: 6px;
+    background: rgb(55 65 81);
+    border-radius: 3px;
+    outline: none;
+}
+input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: #F1C609;
+    cursor: pointer;
+}
+
+/* HTMX indicator */
+.htmx-indicator {
+    display: none;
+}
+.htmx-request .htmx-indicator {
+    display: inline-block;
+}
+.htmx-request.htmx-indicator {
+    display: inline-block;
+}
