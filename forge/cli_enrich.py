@@ -105,7 +105,10 @@ def _run_enrichment_pipeline(
             resume=args.resume,
         )
     except ImportError as e:
-        die(f"Missing dependency: {e}", hint="Run: pip install forge-enrichment")
+        die(
+            f"Missing dependency: {e}",
+            hint="Run: pip install git+https://github.com/Nuclear-Marmalade/dataforge.git",
+        )
     except KeyboardInterrupt:
         warn("Interrupted.")
         return None
