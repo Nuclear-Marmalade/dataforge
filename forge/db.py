@@ -114,6 +114,15 @@ class ForgeDB(_ForgeDBIOMixin):
 
         with self._backend.write_connection() as conn:
             conn.execute(ddl)
+            # CREATE TABLE IF NOT EXISTS leaves a table from an older FORGE version
+            # untouched, so add any columns it is missing before indexing them.
+            existing = {row[1] for row in conn.execute("PRAGMA table_info(businesses)")}
+            for col_name, sqlite_type, _, _, _ in BUSINESS_COLUMNS:
+                # SQLite cannot ADD COLUMN a primary key or a non-constant default.
+                if col_name in existing or "PRIMARY KEY" in sqlite_type or "(" in sqlite_type:
+                    continue
+                conn.execute(f"ALTER TABLE businesses ADD COLUMN {col_name} {sqlite_type}")
+                logger.info("Added missing column businesses.%s", col_name)
             for idx_name, idx_col in BUSINESS_INDEXES:
                 conn.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON businesses ({idx_col})")
             conn.commit()
@@ -131,6 +140,17 @@ class ForgeDB(_ForgeDBIOMixin):
             # Ensure uuid-ossp extension for gen_random_uuid (pgcrypto provides it too)
             cur.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
             cur.execute(ddl)
+            # Same upgrade path as SQLite: add columns an older table is missing.
+            cur.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = 'businesses'"
+            )
+            existing = {row[0] for row in cur.fetchall()}
+            for col_name, _, pg_type, _, _ in BUSINESS_COLUMNS:
+                if col_name in existing or "PRIMARY KEY" in pg_type:
+                    continue
+                cur.execute(f"ALTER TABLE businesses ADD COLUMN IF NOT EXISTS {col_name} {pg_type}")
+                logger.info("Added missing column businesses.%s", col_name)
             for idx_name, idx_col in BUSINESS_INDEXES:
                 cur.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON businesses ({idx_col})")
             conn.commit()
