@@ -6,6 +6,7 @@ from forge.tools.web_scraper import (
     AsyncWebScraper,
     WebScrapeTool,
     decode_cf_email,
+    rank_emails,
 )
 
 # ---------------------------------------------------------------------------
@@ -362,3 +363,33 @@ class TestExtractFooterEmails:
         html = "x" * 100 + "<footer>No emails here</footer>"
         emails = scraper._extract_footer_emails(html)
         assert len(emails) == 0
+
+
+# ---------------------------------------------------------------------------
+# Tests: rank_emails (best contact first, nothing dropped)
+# ---------------------------------------------------------------------------
+
+
+class TestRankEmails:
+    def test_low_value_inbox_ranked_last(self):
+        ranked = rank_emails(["privacy@thorne.com", "info@thorne.com"], "www.thorne.com")
+        assert ranked == ["info@thorne.com", "privacy@thorne.com"]
+
+    def test_own_domain_before_third_party(self):
+        ranked = rank_emails(["owner@gmail.com", "hello@biz.com"], "biz.com")
+        assert ranked == ["hello@biz.com", "owner@gmail.com"]
+
+    def test_third_party_contact_beats_own_domain_low_value(self):
+        ranked = rank_emails(["privacy@biz.com", "owner@gmail.com"], "biz.com")
+        assert ranked == ["owner@gmail.com", "privacy@biz.com"]
+
+    def test_subdomain_site_counts_as_own_domain(self):
+        ranked = rank_emails(["a@other.com", "sales@biz.com"], "shop.biz.com")
+        assert ranked[0] == "sales@biz.com"
+
+    def test_keeps_every_email_once(self):
+        ranked = rank_emails(["Info@Biz.com", "info@biz.com", "careers@biz.com"], "biz.com")
+        assert ranked == ["info@biz.com", "careers@biz.com"]
+
+    def test_empty(self):
+        assert rank_emails([], "biz.com") == []

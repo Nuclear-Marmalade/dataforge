@@ -1,5 +1,6 @@
 """Tests for forge.enrichment.pipeline."""
 
+import json
 import time
 from unittest.mock import MagicMock, patch
 
@@ -346,3 +347,29 @@ class TestIndustryWhitelist:
     def test_key_categories_present(self):
         for cat in ["dentist", "lawyer", "plumber", "restaurant", "salon"]:
             assert cat in INDUSTRY_WHITELIST
+
+
+# ---------------------------------------------------------------------------
+# Tests: scrape result -> updates (keeps every email, not just the first)
+# ---------------------------------------------------------------------------
+
+
+class TestProcessScrapeResult:
+    @patch("forge.enrichment.pipeline.AsyncWebScraper")
+    def test_saves_best_email_and_all_emails(self, mock_scraper_cls):
+        pipeline = EnrichmentPipeline(db_pool=MockDB(), ollama=None, web_scraper_workers=1)
+        url = "https://biz.com"
+        result = {
+            "url": url,
+            "status": "ok",
+            "emails": ["partnerships@biz.com", "info@biz.com", "privacy@biz.com"],
+        }
+        biz_id, updates, is_failure = pipeline._process_scrape_result(result, {url: {"id": "b1"}})
+        assert biz_id == "b1"
+        assert is_failure is False
+        assert updates["email"] == "partnerships@biz.com"
+        assert json.loads(updates["all_emails"]) == [
+            "partnerships@biz.com",
+            "info@biz.com",
+            "privacy@biz.com",
+        ]
