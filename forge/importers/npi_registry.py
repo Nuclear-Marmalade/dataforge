@@ -56,6 +56,30 @@ def classify_taxonomy(taxonomy_desc: Optional[str]) -> Optional[str]:
     return None
 
 
+def _official_part(basic: Dict, field: str) -> str:
+    """Read one authorized_official_* field; NPPES uses '--' for blank."""
+    value = (basic.get(f"authorized_official_{field}") or "").strip()
+    return "" if value == "--" else value
+
+
+def extract_authorized_official(basic: Dict) -> Optional[Dict[str, Optional[str]]]:
+    """Return the named person NPPES lists as an organization's authorized official.
+
+    Every NPI-2 (organization) record carries one: name, title and phone.
+    Returns None when the record has no first and last name.
+    """
+    first = _official_part(basic, "first_name")
+    last = _official_part(basic, "last_name")
+    if not first or not last:
+        return None
+    middle = _official_part(basic, "middle_name")
+    return {
+        "name": " ".join(p for p in (first, middle, last) if p),
+        "title": _official_part(basic, "title_or_position") or None,
+        "phone": normalize_phone(_official_part(basic, "telephone_number")),
+    }
+
+
 def _parse_npi_result(r: Dict) -> Dict:
     """Parse a single NPI API result into a provider dict."""
     basic = r.get("basic", {})
@@ -81,6 +105,7 @@ def _parse_npi_result(r: Dict) -> Dict:
         if practice_addr
         else None
     )
+    official = extract_authorized_official(basic) or {}
     return {
         "npi": str(r.get("number", "")),
         "org_name": basic.get("organization_name", ""),
@@ -90,6 +115,9 @@ def _parse_npi_result(r: Dict) -> Dict:
         "zip": (practice_addr or {}).get("postal_code", "")[:5],
         "taxonomy": primary_tax,
         "industry": classify_taxonomy(primary_tax),
+        "official_name": official.get("name"),
+        "official_title": official.get("title"),
+        "official_phone": official.get("phone"),
     }
 
 
@@ -212,7 +240,7 @@ def _match_npi_results(
 ) -> tuple:
     """Match NPI API results against a business by phone or name.
 
-    Returns (matched_npi, matched_industry) or (None, None).
+    Returns (matched_npi, matched_industry, authorized_official) or (None, None, None).
     """
     for r in results:
         basic = r.get("basic", {})
@@ -240,9 +268,9 @@ def _match_npi_results(
                 if tax.get("primary"):
                     matched_industry = classify_taxonomy(tax.get("desc", ""))
                     break
-            return matched_npi, matched_industry
+            return matched_npi, matched_industry, extract_authorized_official(basic)
 
-    return None, None
+    return None, None, None
 
 
 def _write_npi_match(
@@ -252,6 +280,7 @@ def _write_npi_match(
     matched_industry: Optional[str],
     stats: Dict[str, int],
     ph: str,
+    official: Optional[Dict[str, Optional[str]]] = None,
 ) -> None:
     """Write matched NPI data to the database."""
     try:
@@ -266,12 +295,30 @@ def _write_npi_match(
             params_list.append(matched_industry)
             stats["industry_written"] += 1
 
+        contact_written = False
+        if official:
+            # Write the person as one unit, and only when the row has no contact yet,
+            # so an existing contact never ends up with this official's title or phone.
+            # SET expressions read the pre-update row, so contact_name here is the old value.
+            no_contact = "COALESCE(contact_name, '') = ''"
+            for col, value in (
+                ("contact_name", official["name"]),
+                ("contact_title", official["title"]),
+                ("contact_phone", official["phone"]),
+            ):
+                updates.append(f"{col} = CASE WHEN {no_contact} THEN {ph} ELSE {col} END")
+                params_list.append(value)
+            contact_written = not (db.get_business(biz_id) or {}).get("contact_name")
+
         updates.append(f"updated_at = {now_expr}")
         query = f"UPDATE businesses SET {', '.join(updates)} WHERE id = {uuid_cast}"
         params_list.append(biz_id)
         with db.transaction() as tx:
             tx.execute(query, tuple(params_list))
-    except Exception:
+        if contact_written:
+            stats["contact_written"] += 1
+    except Exception as e:  # Non-critical: count the failure, keep importing
+        logger.warning("NPI write failed for business %s: %s", biz_id, e)
         stats["errors"] += 1
 
 
@@ -290,6 +337,7 @@ def import_npi_for_state(
         "name_matches": 0,
         "npi_written": 0,
         "industry_written": 0,
+        "contact_written": 0,
         "errors": 0,
     }
 
@@ -311,10 +359,10 @@ def import_npi_for_state(
         stats["npi_lookups"] += 1
 
         results = data.get("results", [])
-        matched_npi, matched_industry = _match_npi_results(results, phone, name, stats)
+        matched_npi, matched_industry, official = _match_npi_results(results, phone, name, stats)
 
         if matched_npi:
-            _write_npi_match(db, biz["id"], matched_npi, matched_industry, stats, ph)
+            _write_npi_match(db, biz["id"], matched_npi, matched_industry, stats, ph, official)
 
         time.sleep(0.3)
 
@@ -382,20 +430,13 @@ def import_npi_all_states(
             "DC",
         ]
 
-    totals = {
-        "npi_records_fetched": 0,
-        "phone_matches": 0,
-        "name_matches": 0,
-        "npi_written": 0,
-        "industry_written": 0,
-        "errors": 0,
-    }
+    totals: Dict[str, int] = {}
 
     for state in states:
         logger.info("Processing NPI for %s...", state)
         state_stats = import_npi_for_state(state, db_path=db_path)
-        for k in totals:
-            totals[k] += state_stats[k]
+        for k, v in state_stats.items():
+            totals[k] = totals.get(k, 0) + v
         logger.info("  %s done: %s", state, json.dumps(state_stats))
 
     return totals

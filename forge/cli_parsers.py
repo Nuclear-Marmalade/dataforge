@@ -207,7 +207,7 @@ def build_parser(cmd_handlers: dict) -> argparse.ArgumentParser:
         prog="forge",
         description="FORGE -- Free Open-source Runtime for Generalized Enrichment.\nThe open-source alternative to Apollo, ZoomInfo, and Clearbit.\n\nQuick start:\n  forge enrich --file businesses.csv\n  forge status\n",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="Documentation: https://github.com/ghealysr/forge\n",
+        epilog="Documentation: https://github.com/Nuclear-Marmalade/dataforge\n",
     )
     parser.add_argument("--version", "-V", action="version", version=f"forge {__version__}")
     sub = parser.add_subparsers(

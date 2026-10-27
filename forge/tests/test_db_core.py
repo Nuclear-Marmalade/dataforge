@@ -381,3 +381,26 @@ class TestPrepareValue:
 
 import csv  # noqa: E402
 import os  # noqa: E402
+
+
+class TestEnsureSchemaUpgradesExistingTable:
+    def test_adds_missing_columns(self, tmp_path):
+        import sqlite3
+
+        db_path = str(tmp_path / "old.db")
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE businesses (id TEXT PRIMARY KEY, name TEXT, "
+            "created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))"
+        )
+        conn.execute("INSERT INTO businesses (id, name) VALUES ('b1', 'Old Row')")
+        conn.commit()
+        conn.close()
+
+        db = ForgeDB.from_config({"db_path": db_path})
+        db.ensure_schema()
+        cols = {r["name"] for r in db.fetch_dicts("PRAGMA table_info(businesses)")}
+        assert {"contact_title", "contact_name", "all_emails", "email"} <= cols
+        assert db.get_business("b1")["name"] == "Old Row"
+        db.ensure_schema()  # second call is a no-op
+        db.close()

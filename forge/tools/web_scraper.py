@@ -11,7 +11,7 @@ import json
 import logging
 import re
 import time
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import urljoin, urlparse
 
 import aiohttp
@@ -169,6 +169,60 @@ _MAX_BODY_SIZE = 5 * 1024 * 1024
 _USER_AGENT = "Mozilla/5.0 (compatible; ForgeBot/1.0; business-directory-enrichment)"
 
 
+# Inboxes that rarely reach a person who can answer a business inquiry. Kept, but ranked last.
+_LOW_VALUE_EMAIL_PREFIXES = {
+    "abuse",
+    "accessibility",
+    "careers",
+    "compliance",
+    "copyright",
+    "dataprotection",
+    "dmca",
+    "donotreply",
+    "do-not-reply",
+    "dpo",
+    "gdpr",
+    "hostmaster",
+    "hr",
+    "jobs",
+    "legal",
+    "no-reply",
+    "noreply",
+    "postmaster",
+    "privacy",
+    "recruiting",
+    "security",
+    "unsubscribe",
+    "webmaster",
+}
+
+
+def _bare_host(host: str) -> str:
+    host = (host or "").lower().strip()
+    return host[4:] if host.startswith("www.") else host
+
+
+def rank_emails(emails: Iterable[str], site_host: str) -> List[str]:
+    """Order emails best contact first, keeping every one.
+
+    Low-value inboxes (privacy@, careers@, noreply@ ...) go last; within each group,
+    addresses on the site's own domain come before third-party ones.
+    """
+    site = _bare_host(site_host)
+
+    def own_domain(domain: str) -> bool:
+        return bool(site) and (
+            domain == site or site.endswith("." + domain) or domain.endswith("." + site)
+        )
+
+    def sort_key(email: str) -> Tuple[bool, bool, str]:
+        local, _, domain = email.partition("@")
+        return (local in _LOW_VALUE_EMAIL_PREFIXES, not own_domain(domain), email)
+
+    unique = {e.lower().strip() for e in emails if e and e.strip()}
+    return sorted(unique, key=sort_key)
+
+
 def decode_cf_email(encoded: str) -> Optional[str]:
     """Decode Cloudflare's __cf_email__ obfuscation."""
     try:
@@ -267,7 +321,8 @@ class AsyncWebScraper:
         emails.update(self._decode_obfuscated_emails(html))
         emails.update(self._extract_footer_emails(html))
 
-        data["emails"] = sorted(emails)
+        # Rank against the site we landed on, so a redirect to a new brand domain still counts.
+        data["emails"] = rank_emails(emails, urlparse(resp_url).hostname or domain)
         return data
 
     async def _handle_ssl_fallback(
@@ -294,7 +349,9 @@ class AsyncWebScraper:
                         if cms in result["tech_stack"]:
                             result["cms_detected"] = cms
                             break
-                    result["emails"] = sorted(self._extract_emails(html))
+                    result["emails"] = rank_emails(
+                        self._extract_emails(html), urlparse(url).hostname or ""
+                    )
                 else:
                     result["status"] = f"http_{resp.status}"
         except Exception:

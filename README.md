@@ -1,7 +1,7 @@
 # FORGE
 <img width="1600" height="672" alt="forge_logo" src="https://github.com/user-attachments/assets/2faaff1c-1275-49ea-b528-f9baa536f907" />
 
-![CI](https://github.com/ghealysr/forge/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/Nuclear-Marmalade/dataforge/actions/workflows/ci.yml/badge.svg)
 
 The open-source alternative to Apollo, ZoomInfo, and Clearbit. Enriches business databases using free data sources and local AI.
 
@@ -9,7 +9,7 @@ The open-source alternative to Apollo, ZoomInfo, and Clearbit. Enriches business
 
 
 ```bash
-pip install forge-enrichment
+pip install git+https://github.com/Nuclear-Marmalade/dataforge.git
 
 # enrich a CSV (no config needed)
 forge enrich --file leads.csv --output enriched.csv
@@ -45,7 +45,7 @@ Apollo, ZoomInfo, and Clearbit charge $10K-50K/year for data that's largely scra
 
 **Government data importers**:
 - FCC ULS -- telecom license holders (~3M records)
-- NPI Registry -- healthcare providers (~7M records, free API)
+- NPI Registry -- healthcare providers (~7M records, free API), including each organization's authorized official (name, title, phone)
 - SAM.gov -- federal contractors (~900K entities, free API key)
 
 **Local AI enrichment** (via Ollama): business summaries, industry classification, health scores, pain points. No API costs.
@@ -81,7 +81,9 @@ Both use COALESCE writes (only update NULL fields) and checkpoint after every ba
 ## Setup
 
 ```bash
-git clone https://github.com/ghealysr/forge.git && cd forge
+git clone https://github.com/Nuclear-Marmalade/dataforge.git && cd dataforge
+python3 -m venv .venv && source .venv/bin/activate
+pip install --upgrade pip   # the pip bundled with macOS's Python can't do editable installs
 pip install -e .
 ```
 

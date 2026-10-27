@@ -229,7 +229,9 @@ class EnrichmentPipeline:
 
         updates: Dict[str, Any] = {}
         if result.get("emails"):
+            # The scraper ranks emails best-first; keep the best as the contact and save all.
             updates["email"] = result["emails"][0]
+            updates["all_emails"] = json.dumps(result["emails"])
             with self._lock:
                 self._stats.emails_found += 1
         if result.get("tech_stack"):

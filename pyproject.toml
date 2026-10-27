@@ -52,10 +52,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/ghealysr/forge"
-Documentation = "https://github.com/ghealysr/forge#readme"
-Repository = "https://github.com/ghealysr/forge"
-Issues = "https://github.com/ghealysr/forge/issues"
+Homepage = "https://github.com/Nuclear-Marmalade/dataforge"
+Documentation = "https://github.com/Nuclear-Marmalade/dataforge#readme"
+Repository = "https://github.com/Nuclear-Marmalade/dataforge"
+Issues = "https://github.com/Nuclear-Marmalade/dataforge/issues"
 
 [project.scripts]
 forge = "forge.cli:main"

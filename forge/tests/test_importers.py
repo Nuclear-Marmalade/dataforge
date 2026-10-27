@@ -1,5 +1,7 @@
 """Tests for forge.importers."""
 
+from unittest.mock import patch
+
 from forge.importers.fcc_uls import (
     BUSINESS_TYPES,
     COL_APPLICANT_TYPE,
@@ -17,7 +19,11 @@ from forge.importers.fcc_uls import (
     normalize_phone as fcc_normalize_phone,
 )
 from forge.importers.npi_registry import (
+    _match_npi_results,
+    _write_npi_match,
     classify_taxonomy,
+    extract_authorized_official,
+    import_npi_all_states,
 )
 from forge.importers.npi_registry import (
     normalize_phone as npi_normalize_phone,
@@ -377,3 +383,136 @@ class TestExtractDomain:
         # Subdomains that aren't www should be kept
         result = extract_domain("https://shop.mybiz.com")
         assert result == "shop.mybiz.com"
+
+
+# ---------------------------------------------------------------------------
+# NPI Registry: authorized official (the named person behind an organization)
+# ---------------------------------------------------------------------------
+
+_NPI_BASIC = {
+    "organization_name": "ADAM DIASTI DDS & ASSOCIATES P.C.",
+    "authorized_official_first_name": "PATRICIA",
+    "authorized_official_middle_name": "A",
+    "authorized_official_last_name": "HUIE",
+    "authorized_official_name_prefix": "--",
+    "authorized_official_title_or_position": "Office Manager",
+    "authorized_official_telephone_number": "813-288-1999",
+}
+
+
+def _npi_result(basic, phone="8132881999", number="1366540270"):
+    return {
+        "number": number,
+        "basic": basic,
+        "addresses": [{"address_purpose": "LOCATION", "telephone_number": phone}],
+        "taxonomies": [{"primary": True, "desc": "Dentist"}],
+    }
+
+
+def _empty_npi_stats():
+    return {
+        "phone_matches": 0,
+        "name_matches": 0,
+        "npi_written": 0,
+        "industry_written": 0,
+        "contact_written": 0,
+        "errors": 0,
+    }
+
+
+class TestExtractAuthorizedOfficial:
+    def test_name_title_phone(self):
+        official = extract_authorized_official(_NPI_BASIC)
+        assert official == {
+            "name": "PATRICIA A HUIE",
+            "title": "Office Manager",
+            "phone": "8132881999",
+        }
+
+    def test_skips_placeholder_parts(self):
+        basic = {**_NPI_BASIC, "authorized_official_middle_name": "--"}
+        assert extract_authorized_official(basic)["name"] == "PATRICIA HUIE"
+
+    def test_no_name_returns_none(self):
+        assert extract_authorized_official({"organization_name": "X"}) is None
+
+    def test_missing_title_and_phone(self):
+        basic = {
+            "authorized_official_first_name": "JO",
+            "authorized_official_last_name": "LEE",
+        }
+        assert extract_authorized_official(basic) == {
+            "name": "JO LEE",
+            "title": None,
+            "phone": None,
+        }
+
+
+class TestMatchNPIResults:
+    def test_phone_match_returns_official(self):
+        stats = _empty_npi_stats()
+        npi, industry, official = _match_npi_results(
+            [_npi_result(_NPI_BASIC)], "8132881999", "Some Other Name", stats
+        )
+        assert npi == "1366540270"
+        assert industry == "dentist"
+        assert official["name"] == "PATRICIA A HUIE"
+        assert stats["phone_matches"] == 1
+
+    def test_no_match(self):
+        stats = _empty_npi_stats()
+        assert _match_npi_results([_npi_result(_NPI_BASIC)], "1112223333", "Nope", stats) == (
+            None,
+            None,
+            None,
+        )
+
+
+class TestWriteNPIMatch:
+    def test_fills_contact_when_empty(self, sqlite_db):
+        bid = sqlite_db.upsert_business({"name": "Diasti Dental", "state": "FL"})
+        stats = _empty_npi_stats()
+        official = extract_authorized_official(_NPI_BASIC)
+        _write_npi_match(sqlite_db, bid, "1366540270", "dentist", stats, "?", official)
+        record = sqlite_db.get_business(bid)
+        assert record["npi_number"] == "1366540270"
+        assert record["contact_name"] == "PATRICIA A HUIE"
+        assert record["contact_title"] == "Office Manager"
+        assert record["contact_phone"] == "8132881999"
+        assert stats["contact_written"] == 1
+        assert stats["errors"] == 0
+
+    def test_never_mixes_with_existing_contact(self, sqlite_db):
+        bid = sqlite_db.upsert_business(
+            {"name": "Diasti Dental", "state": "FL", "contact_name": "Jane Owner"}
+        )
+        stats = _empty_npi_stats()
+        official = extract_authorized_official(_NPI_BASIC)
+        _write_npi_match(sqlite_db, bid, "1366540270", None, stats, "?", official)
+        record = sqlite_db.get_business(bid)
+        assert record["npi_number"] == "1366540270"
+        assert record["contact_name"] == "Jane Owner"
+        assert not record.get("contact_title")
+        assert not record.get("contact_phone")
+        assert stats["contact_written"] == 0
+
+
+class TestImportNPIAllStates:
+    def test_sums_state_stats_without_key_error(self):
+        state_stats = {
+            "our_healthcare_businesses": 4,
+            "npi_lookups": 4,
+            "phone_matches": 1,
+            "name_matches": 1,
+            "npi_written": 2,
+            "industry_written": 1,
+            "contact_written": 2,
+            "errors": 0,
+        }
+        with patch(
+            "forge.importers.npi_registry.import_npi_for_state", return_value=dict(state_stats)
+        ):
+            totals = import_npi_all_states(["FL", "GA"])
+        assert totals["npi_written"] == 4
+        assert totals["contact_written"] == 4
+        assert totals["npi_lookups"] == 8
