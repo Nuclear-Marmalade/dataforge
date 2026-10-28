@@ -417,6 +417,37 @@ class TestRankEmails:
 
 
 # ---------------------------------------------------------------------------
+# Tests: email scans stay linear on long runs (inline base64 froze the event loop)
+# ---------------------------------------------------------------------------
+
+
+class TestEmailScanSpeed:
+    def test_long_run_without_at_sign_scans_fast(self, scraper):
+        # A 200 KB base64-like run: the unbounded patterns took minutes on this.
+        page = '<img src="data:image/png;base64,' + "A" * 200_000 + '">'
+        start = time.monotonic()
+        scraper._extract_emails(page)
+        scraper._decode_obfuscated_emails(page)
+        scraper._extract_footer_emails(page)
+        scraper._extract_mailto(page)
+        assert time.monotonic() - start < 2
+
+    def test_addresses_still_found(self, scraper):
+        page = (
+            "<p>Email: info@biz.com.</p>"
+            '<a href="mailto:Sales@Biz.com">x</a>'
+            "<p>owner [at] biz [dot] com</p>"
+            "<p>hello&#64;biz&#46;com</p>"
+        )
+        found = (
+            scraper._extract_emails(page)
+            | scraper._extract_mailto(page)
+            | scraper._decode_obfuscated_emails(page)
+        )
+        assert {"info@biz.com", "sales@biz.com", "owner@biz.com", "hello@biz.com"} <= found
+
+
+# ---------------------------------------------------------------------------
 # Tests: keep_business_emails (cases from a 500-business live test)
 # ---------------------------------------------------------------------------
 

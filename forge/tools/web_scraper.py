@@ -20,26 +20,34 @@ from aiolimiter import AsyncLimiter
 logger = logging.getLogger("forge.tools.web_scraper")
 
 # ── Email extraction patterns ────────────────────────────────────────────────
+# Every part is length-bounded (local 64, domain 253, TLD 24) and a match may only start
+# where a run of address characters starts. Unbounded `[...]+@` retries from every position
+# of a long run without an @ (an inline base64 image), which is quadratic: a few hundred KB
+# blocked the event loop for minutes, and with it every site's timeout.
+_LOCAL = r"(?<![a-zA-Z0-9._%+\-])[a-zA-Z0-9._%+\-]{1,64}"
+_DOMAIN = r"[a-zA-Z0-9.\-]{1,253}"
+_TLD = r"[a-zA-Z]{2,24}"
 
-_EMAIL_RE = re.compile(
-    r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}",
-    re.IGNORECASE,
-)
+_EMAIL_RE = re.compile(_LOCAL + "@" + _DOMAIN + r"\." + _TLD, re.IGNORECASE)
 
-_MAILTO_RE = re.compile(r"mailto:([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})", re.IGNORECASE)
+_MAILTO_RE = re.compile(r"mailto:(" + _LOCAL + "@" + _DOMAIN + r"\." + _TLD + ")", re.IGNORECASE)
 
 # Cloudflare email obfuscation pattern
 _CF_EMAIL_RE = re.compile(r'data-cfemail="([a-fA-F0-9]+)"')
 
 # Obfuscated email patterns: [at], (at), [dot], (dot) variations
 _OBFUSCATED_EMAIL_RE = re.compile(
-    r"[a-zA-Z0-9._%+\-]+\s*[\[\(]\s*(?:at|AT)\s*[\]\)]\s*[a-zA-Z0-9.\-]+\s*[\[\(]\s*(?:dot|DOT)\s*[\]\)]\s*[a-zA-Z]{2,}",
+    _LOCAL
+    + r"\s{0,3}[\[\(]\s{0,3}(?:at|AT)\s{0,3}[\]\)]\s{0,3}"
+    + _DOMAIN
+    + r"\s{0,3}[\[\(]\s{0,3}(?:dot|DOT)\s{0,3}[\]\)]\s{0,3}"
+    + _TLD,
     re.IGNORECASE,
 )
 
 # HTML numeric entity for @ (&#64;) and . (&#46;)
 _HTML_ENTITY_EMAIL_RE = re.compile(
-    r"[a-zA-Z0-9._%+\-]+(?:&#64;|&#x40;)[a-zA-Z0-9.\-]+(?:&#46;|&#x2e;)[a-zA-Z]{2,}",
+    _LOCAL + "(?:&#64;|&#x40;)" + _DOMAIN + "(?:&#46;|&#x2e;)" + _TLD,
     re.IGNORECASE,
 )
 
