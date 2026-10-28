@@ -10,6 +10,7 @@ from forge.tools.web_scraper import (
     AsyncWebScraper,
     WebScrapeTool,
     decode_cf_email,
+    keep_business_emails,
     rank_emails,
 )
 
@@ -99,6 +100,22 @@ class TestIsValidEmail:
 
     def test_rejects_too_long(self, scraper):
         assert scraper._is_valid_email("a" * 250 + "@x.com") is False
+
+    def test_rejects_subdomains_of_fake_domains(self, scraper):
+        # Wix pages embed error-tracker IDs that look like addresses.
+        assert (
+            scraper._is_valid_email("2062d0a4929b45348643784b5cb39c36@sentry.wixpress.com") is False
+        )
+
+    def test_rejects_template_placeholders(self, scraper):
+        for email in [
+            "email@gmail.com",
+            "filler@godaddy.com",
+            "hi@mystore.com",
+            "youremail@gmail.com",
+            "name@biz.com",
+        ]:
+            assert scraper._is_valid_email(email) is False, email
 
 
 # ---------------------------------------------------------------------------
@@ -397,6 +414,65 @@ class TestRankEmails:
 
     def test_empty(self):
         assert rank_emails([], "biz.com") == []
+
+
+# ---------------------------------------------------------------------------
+# Tests: keep_business_emails (cases from a 500-business live test)
+# ---------------------------------------------------------------------------
+
+
+class TestKeepBusinessEmails:
+    def test_keeps_own_domain_and_subdomains(self):
+        emails = ["info@biz.com", "sales@shop.biz.com"]
+        assert keep_business_emails(emails, "www.biz.com") == emails
+
+    def test_keeps_free_and_isp_mail(self):
+        emails = [
+            "palomalashbeauty@gmail.com",
+            "davidcityrx@windstream.net",
+            "owner@tampabay.rr.com",
+        ]
+        assert keep_business_emails(emails, "palomalashbeauty.com") == emails
+
+    def test_keeps_a_related_brand_domain(self):
+        assert keep_business_emails(["info@hydralifewater.com"], "hydralifewaterservices.com") == [
+            "info@hydralifewater.com"
+        ]
+        assert keep_business_emails(["jobs@skanska.co.uk"], "usa.skanska.com") == [
+            "jobs@skanska.co.uk"
+        ]
+
+    def test_drops_other_organisations(self):
+        cases = [
+            ("contactus@conocophillips.com", "marathon.com"),
+            ("developers@icompasstech.com", "msjc.edu"),
+            ("consumer.complaints@occc.texas.gov", "creditcentralllc.com"),
+            ("support@casino-rain-bet.it", "hahnextremefitness.com"),
+            ("info@heartofcreative.com", "pulsemarketingteam.com"),
+        ]
+        for email, site in cases:
+            assert keep_business_emails([email], site) == [], (email, site)
+
+    def test_short_names_are_not_related(self):
+        assert keep_business_emails(["hi@joes.com"], "joesplumbing.com") == []
+
+    def test_any_domain_on_a_link_page(self):
+        assert keep_business_emails(["services@cleanprostl.com"], "linktr.ee") == [
+            "services@cleanprostl.com"
+        ]
+
+    def test_scraped_page_keeps_only_the_business(self, scraper):
+        html = (
+            '<a href="mailto:hello@acmedental.com">Email us</a>'
+            "<footer>Site by developers@icompasstech.com</footer>"
+        )
+
+        async def go():
+            return await scraper._extract_all_data(
+                html, {}, "https://acmedental.com/", None, "acmedental.com"
+            )
+
+        assert asyncio.run(go())["emails"] == ["hello@acmedental.com"]
 
 
 # ---------------------------------------------------------------------------
