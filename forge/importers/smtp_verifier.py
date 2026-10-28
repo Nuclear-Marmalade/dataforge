@@ -60,8 +60,11 @@ CHECKPOINT_INTERVAL = 5000  # Save checkpoint every N records processed
 SMTP_TIMEOUT = 5  # seconds
 RATE_LIMIT_DELAY = 0.5  # 2 verifications per second = 0.5s between each
 
-# Sender identity used in MAIL FROM during RCPT TO probe
-PROBE_FROM = os.environ.get("FORGE_SMTP_FROM", "verify@example.com")
+# Sender used in MAIL FROM during the RCPT TO probe. Empty means the null sender
+# (MAIL FROM:<>), which mail servers must accept; a made-up address such as
+# verify@example.com is refused by many of them, and a refused sender reads as a
+# rejected recipient.
+PROBE_FROM = os.environ.get("FORGE_SMTP_FROM", "").strip()
 PROBE_EHLO = os.environ.get("FORGE_SMTP_EHLO", "localhost")
 
 # ---------------------------------------------------------------------------
@@ -202,8 +205,10 @@ def _smtp_check(email: str, mx_host: str) -> Optional[int]:
     or None on connection/timeout failure.
     """
     try:
-        smtp = smtplib.SMTP(timeout=SMTP_TIMEOUT)
-        smtp.connect(mx_host, 25)
+        # The host goes to the constructor: smtplib only records it there, and STARTTLS
+        # uses it as the TLS server name. connect() alone leaves it empty, and
+        # starttls() then raises ValueError on every server that offers STARTTLS.
+        smtp = smtplib.SMTP(mx_host, 25, local_hostname=PROBE_EHLO, timeout=SMTP_TIMEOUT)
         smtp.ehlo(PROBE_EHLO)
 
         # Try STARTTLS if available (some servers require it before RCPT TO)
@@ -383,7 +388,7 @@ def verify_business(business_id: str, website_url: str) -> Optional[Tuple[str, s
 
     # Check for catch-all domain
     if is_catchall_domain(domain, mx_hosts):
-        logger.debug("Catch-all domain, skipping: %s (business %d)", domain, business_id)
+        logger.debug("Catch-all domain, skipping: %s (business %s)", domain, business_id)
         return None
 
     # Try each candidate email prefix
@@ -391,7 +396,7 @@ def verify_business(business_id: str, website_url: str) -> Optional[Tuple[str, s
         candidate = f"{prefix}@{domain}"
         try:
             if verify_email(candidate, mx_hosts):
-                logger.debug("Verified: %s for business %d", candidate, business_id)
+                logger.debug("Verified: %s for business %s", candidate, business_id)
                 return (business_id, candidate)
         except Exception as e:
             logger.debug("Error verifying %s: %s", candidate, e)
