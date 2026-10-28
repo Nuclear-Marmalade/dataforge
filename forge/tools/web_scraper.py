@@ -252,11 +252,15 @@ class AsyncWebScraper:
         connect_timeout: float = 3.0,
         total_timeout: float = 10.0,
         rate_limit: float = 100.0,
+        site_timeout: float = 60.0,
     ):
         self._max_concurrent = max_concurrent
         self._max_per_host = max_per_host
         self._connect_timeout = connect_timeout
         self._total_timeout = total_timeout
+        # total_timeout caps each request; site_timeout caps the whole site, which can
+        # chain the home page, the plain-HTTP fallback and every contact path.
+        self._site_timeout = site_timeout
         self._semaphore: Optional[asyncio.Semaphore] = None
         self._session: Optional[aiohttp.ClientSession] = None
         self._rate_limiter = AsyncLimiter(rate_limit, 1)  # rate_limit req/sec
@@ -313,7 +317,7 @@ class AsyncWebScraper:
         emails.update(self._extract_emails(html))
 
         if not emails:
-            base = f"{urlparse(resp_url).scheme}://{urlparse(resp_url).hostname}"
+            base = f"{urlparse(resp_url).scheme}://{urlparse(resp_url).netloc}"
             contact_emails = await self._crawl_contact_pages(session, base, domain)
             emails.update(contact_emails)
 
@@ -411,16 +415,27 @@ class AsyncWebScraper:
         try:
             assert self._semaphore is not None
             async with self._semaphore:
-                await self._rate_limiter.acquire()
                 domain = urlparse(url).hostname or ""
-                await self._domain_rate_limit(domain)
-                await self._fetch_and_extract(session, url, domain, result)
+                await asyncio.wait_for(
+                    self._scrape_site(session, url, domain, result), timeout=self._site_timeout
+                )
+        except asyncio.TimeoutError:
+            result["status"] = "site_timeout"
+            logger.debug("Site limit (%.0fs) reached for %s", self._site_timeout, url)
         except Exception as e:
             result["status"] = "error"
             result["error"] = str(e)[:200]
             logger.debug("Scrape error for %s: %s", url, e)
 
         return result
+
+    async def _scrape_site(
+        self, session: aiohttp.ClientSession, url: str, domain: str, result: Dict[str, Any]
+    ) -> None:
+        """Every request for one site; scrape_one bounds the whole thing by site_timeout."""
+        await self._rate_limiter.acquire()
+        await self._domain_rate_limit(domain)
+        await self._fetch_and_extract(session, url, domain, result)
 
     async def scrape_batch(self, urls: List[str]) -> List[Dict[str, Any]]:
         """

@@ -1,6 +1,10 @@
-"""Tests for forge.tools.web_scraper (no network calls)."""
+"""Tests for forge.tools.web_scraper (no network calls; one test uses a localhost server)."""
+
+import asyncio
+import time
 
 import pytest
+from aiohttp import web
 
 from forge.tools.web_scraper import (
     AsyncWebScraper,
@@ -393,3 +397,58 @@ class TestRankEmails:
 
     def test_empty(self):
         assert rank_emails([], "biz.com") == []
+
+
+# ---------------------------------------------------------------------------
+# Tests: one time limit for a whole site
+# ---------------------------------------------------------------------------
+
+
+async def _serve_slow_site(delay: float, hits: list):
+    """Localhost site: the home page has no email, every other page answers after `delay`."""
+
+    async def home(request):
+        return web.Response(
+            text="<html><body>No email here</body></html>", content_type="text/html"
+        )
+
+    async def slow(request):
+        hits.append(request.path)
+        await asyncio.sleep(delay)
+        return web.Response(text="<html>still nothing</html>", content_type="text/html")
+
+    app = web.Application()
+    app.router.add_get("/", home)
+    app.router.add_get("/{tail:.+}", slow)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    return runner, site._server.sockets[0].getsockname()[1]
+
+
+class TestSiteTimeout:
+    def test_slow_contact_pages_are_cut_off_at_the_site_limit(self):
+        # Each contact page answers inside the per-request timeout, so without a
+        # site-wide limit the crawl of every contact path would run for ~10 s.
+        hits: list = []
+
+        async def go():
+            runner, port = await _serve_slow_site(delay=0.6, hits=hits)
+            scraper = AsyncWebScraper(max_concurrent=1, total_timeout=2.0, site_timeout=1.5)
+            try:
+                start = time.monotonic()
+                result = await scraper.scrape_one(f"http://127.0.0.1:{port}/")
+                return result, time.monotonic() - start
+            finally:
+                await scraper.close()
+                await runner.cleanup()
+
+        result, elapsed = asyncio.run(go())
+        assert result["status"] == "site_timeout"
+        assert result["status_code"] == 200
+        assert elapsed < 3
+        assert hits[0] == "/contact"  # the cut-off happened inside the contact-page crawl
+
+    def test_default_site_limit(self):
+        assert AsyncWebScraper()._site_timeout == 60.0
