@@ -197,6 +197,25 @@ class TestMCPDiscover:
         result = _tool_forge_discover({"zip_code": "abc"})
         assert "error" in result
 
+    def test_discovered_business_keeps_its_website(self, sqlite_db):
+        from forge.mcp_server import _insert_discovered_businesses
+
+        record = {
+            "name": "Bay Dental",
+            "address_line1": "1 Main St",
+            "city": "Tampa",
+            "state": "FL",
+            "zip": "33602",
+            "website_url": "https://baydental.example",
+            "industry": "healthcare",
+            "sub_industry": "general_dentistry",
+            "category": "general_dentistry",
+            "overture_id": "p1",
+        }
+        assert _insert_discovered_businesses(sqlite_db, [record]) == 1
+        saved = sqlite_db.fetch_dicts("SELECT website_url, industry FROM businesses")
+        assert saved == [{"website_url": "https://baydental.example", "industry": "healthcare"}]
+
     def test_discover_empty_zip(self, sqlite_db):
         from forge.mcp_server import _tool_forge_discover
 
