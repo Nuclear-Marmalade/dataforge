@@ -14,6 +14,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
+from forge.importers.location import same_location
+
 logger = logging.getLogger("forge.importers.sam_gov")
 
 SAM_API_BASE = "https://api.sam.gov/entity-information/v3/entities"
@@ -250,9 +252,10 @@ def _extract_entity(entity: Dict) -> Optional[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def _build_name_state_index(db, state_filter: Optional[str] = None) -> Dict[str, Dict]:
+def _build_name_state_index(db, state_filter: Optional[str] = None) -> Dict[str, List[Dict]]:
     """
-    Build an in-memory index of businesses by (normalized_name, state) -> {id, name, state}.
+    Build an in-memory index of businesses by (normalized_name, state) -> every business
+    with that name in the state, as {id, name, state, city, zip}.
 
     Only includes businesses that currently lack email or contact_email,
     so we only attempt to fill gaps.
@@ -262,32 +265,34 @@ def _build_name_state_index(db, state_filter: Optional[str] = None) -> Dict[str,
 
     if state_filter:
         rows = db.fetch_dicts(
-            f"SELECT id, name, state FROM businesses "
+            f"SELECT id, name, state, city, zip FROM businesses "
             f"WHERE (email IS NULL OR email = '' OR contact_email IS NULL OR contact_email = '') "
             f"AND state = {ph} ORDER BY id",
             (state_filter.upper(),),
         )
     else:
         rows = db.fetch_dicts(
-            "SELECT id, name, state FROM businesses "
+            "SELECT id, name, state, city, zip FROM businesses "
             "WHERE (email IS NULL OR email = '' OR contact_email IS NULL OR contact_email = '') "
             "ORDER BY id",
         )
 
-    index: Dict[str, Dict] = {}
+    index: Dict[str, List[Dict]] = {}
     count = 0
     for row in rows:
         name = row.get("name") or ""
         state = (row.get("state") or "").upper()
         if not name or not state:
             continue
-        key = f"{normalize_name(name)}|{state}"
-        if key not in index:
-            index[key] = {
+        index.setdefault(f"{normalize_name(name)}|{state}", []).append(
+            {
                 "id": str(row["id"]),
                 "name": name,
                 "state": state,
+                "city": row.get("city") or "",
+                "zip": row.get("zip") or "",
             }
+        )
         count += 1
 
     logger.info("Name+state index built: %d unique keys from %d rows", len(index), count)
@@ -380,11 +385,15 @@ def _clear_checkpoint() -> None:
 
 def _process_entities(
     entities: List[Dict],
-    name_state_index: Dict[str, Dict],
+    name_state_index: Dict[str, List[Dict]],
     update_batch: List[Tuple],
     stats: Dict[str, int],
 ) -> None:
-    """Match fetched entities against the business index and collect updates."""
+    """Match fetched entities against the business index and collect updates.
+
+    The business must be at the entity's ZIP (or city): a same-named business elsewhere
+    in the state must never receive this registrant's point of contact.
+    """
     for raw_entity in entities:
         parsed = _extract_entity(raw_entity)
         if not parsed:
@@ -392,8 +401,15 @@ def _process_entities(
 
         stats["entities_with_email"] += 1
 
-        key = f"{parsed['name_normalized']}|{parsed['state']}"
-        biz = name_state_index.get(key)
+        candidates = name_state_index.get(f"{parsed['name_normalized']}|{parsed['state']}", [])
+        biz = next(
+            (
+                b
+                for b in candidates
+                if same_location(b["zip"], b["city"], parsed["zip_code"], parsed["city"])
+            ),
+            None,
+        )
         if not biz:
             continue
 
@@ -408,7 +424,7 @@ def _process_entities(
         )
 
         # Remove from index so we don't double-write
-        del name_state_index[key]
+        candidates.remove(biz)
 
 
 def _should_stop_paging(
@@ -469,7 +485,7 @@ def _paginate_sam_gov(
     flush_every: int,
     start_page: int,
     db: Any,
-    name_state_index: Dict[str, Dict],
+    name_state_index: Dict[str, List[Dict]],
     stats: Dict[str, int],
     update_batch: List[Tuple],
 ) -> None:

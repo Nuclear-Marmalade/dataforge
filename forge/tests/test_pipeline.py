@@ -1,8 +1,14 @@
 """Tests for forge.enrichment.pipeline."""
 
+import argparse
 import json
+import os
+import signal
+import threading
 import time
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from forge.enrichment.pipeline import (
     INDUSTRY_WHITELIST,
@@ -373,3 +379,96 @@ class TestProcessScrapeResult:
             "info@biz.com",
             "privacy@biz.com",
         ]
+
+
+# ---------------------------------------------------------------------------
+# Tests: --no-resume visits each row once, and a stop signal reaches the pipeline
+# ---------------------------------------------------------------------------
+
+
+class BlockedScraper:
+    """Every site answers 403, like the brand sites that looped in a --no-resume run."""
+
+    def __init__(self):
+        self.calls: list = []
+
+    async def scrape_batch(self, urls):
+        self.calls.extend(urls)
+        return [{"url": u, "status": "http_403"} for u in urls]
+
+    async def close(self):
+        pass
+
+
+def _run_with_deadline(pipeline, seconds=10, **kwargs):
+    """Run the pipeline in a thread; stop it and fail the test if it does not finish."""
+    result = {}
+    t = threading.Thread(target=lambda: result.update(stats=pipeline.run(**kwargs)), daemon=True)
+    t.start()
+    t.join(seconds)
+    if t.is_alive():
+        pipeline.stop()
+        t.join(seconds)
+        pytest.fail(f"pipeline.run({kwargs}) did not finish within {seconds}s")
+    return result["stats"]
+
+
+class TestNoResumeVisitsEachRowOnce:
+    @patch("forge.enrichment.pipeline.AsyncWebScraper")
+    def test_email_track_finishes_when_every_site_fails(self, mock_scraper_cls, sqlite_db):
+        scraper = BlockedScraper()
+        mock_scraper_cls.return_value = scraper
+        urls = [f"https://brand{i}.test" for i in range(6)]
+        for i, url in enumerate(urls):
+            sqlite_db.upsert_business({"name": f"Brand {i}", "state": "FL", "website_url": url})
+        pipeline = EnrichmentPipeline(db_pool=sqlite_db.get_pool(), web_scraper_workers=2)
+
+        stats = _run_with_deadline(pipeline, mode="email", resume=False)
+
+        assert sorted(scraper.calls) == sorted(urls)
+        assert stats.total_processed == 6
+
+    @patch("forge.enrichment.pipeline.AsyncWebScraper")
+    def test_ai_track_finishes_when_every_answer_fails(self, mock_scraper_cls, sqlite_db):
+        mock_scraper_cls.return_value = MockScraper()
+        for i in range(4):
+            sqlite_db.upsert_business({"name": f"Shop {i}", "state": "FL"})
+        pipeline = EnrichmentPipeline(
+            db_pool=sqlite_db.get_pool(), ollama=MockOllama(response="not json"), batch_size=3
+        )
+
+        stats = _run_with_deadline(pipeline, mode="ai", resume=False)
+
+        assert stats.total_processed == 4
+
+
+class TestStopSignal:
+    def test_sigterm_reaches_pipeline_stop(self, monkeypatch):
+        from forge import cli_enrich
+
+        stopped = threading.Event()
+
+        class FakePipeline:
+            def __init__(self, **kwargs):
+                pass
+
+            def stop(self):
+                stopped.set()
+
+            def run(self, **kwargs):
+                threading.Timer(0.2, os.kill, (os.getpid(), signal.SIGTERM)).start()
+                return stopped.wait(5)
+
+        class FakeDB:
+            def get_pool(self):
+                return self
+
+        monkeypatch.setattr("forge.enrichment.pipeline.EnrichmentPipeline", FakePipeline)
+        old_int = signal.getsignal(signal.SIGINT)
+        old_term = signal.getsignal(signal.SIGTERM)
+        try:
+            args = argparse.Namespace(workers=1, batch_size=1, max=None, resume=True, state=None)
+            assert cli_enrich._run_enrichment_pipeline(FakeDB(), None, args, 1, "email", 1)
+        finally:
+            signal.signal(signal.SIGINT, old_int)
+            signal.signal(signal.SIGTERM, old_term)
