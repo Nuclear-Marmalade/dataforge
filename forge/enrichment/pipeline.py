@@ -190,18 +190,20 @@ class EnrichmentPipeline:
         self,
         state_filter: Optional[str],
         resume: bool,
+        after_id: Optional[str] = None,
     ) -> tuple:
         """Fetch businesses for scraping and build URL-to-business mapping.
 
-        Returns (urls, url_biz_map) or ([], {}) if nothing to process.
+        Returns (urls, url_biz_map, last_id) or ([], {}, after_id) if nothing to process.
         """
         businesses = self._fetch_businesses_for_scrape(
             state=state_filter,
             limit=self._web_workers * 2,
             resume=resume,
+            after_id=after_id,
         )
         if not businesses:
-            return [], {}
+            return [], {}, after_id
 
         url_biz_map: Dict[str, dict] = {}
         urls: List[str] = []
@@ -210,7 +212,7 @@ class EnrichmentPipeline:
             if url:
                 urls.append(url)
                 url_biz_map[url] = biz
-        return urls, url_biz_map
+        return urls, url_biz_map, businesses[-1]["id"]
 
     def _process_scrape_result(self, result: Dict[str, Any], url_biz_map: Dict[str, dict]) -> tuple:
         """Process a single scrape result into enrichment updates.
@@ -316,9 +318,12 @@ class EnrichmentPipeline:
         """Async scrape websites for email, tech stack, CMS, SSL, speed."""
         logger.info("Email extraction track starting (%d async workers)", self._web_workers)
         processed = 0
+        after_id: Optional[str] = None  # --no-resume cursor: rows already visited this run
 
         while self._running:
-            urls, url_biz_map = self._fetch_and_build_url_map(state_filter, resume)
+            urls, url_biz_map, after_id = self._fetch_and_build_url_map(
+                state_filter, resume, None if resume else after_id
+            )
             if not urls:
                 logger.info("Email extraction: no more businesses to process")
                 break
@@ -348,6 +353,7 @@ class EnrichmentPipeline:
             "AI enrichment track starting (batch_size=%d, model=gemma4:26b)", self._batch_size
         )
         processed = 0
+        after_id: Optional[str] = None  # --no-resume cursor: rows already visited this run
 
         while self._running:
             # Fetch businesses needing AI enrichment
@@ -355,11 +361,14 @@ class EnrichmentPipeline:
                 state=state_filter,
                 limit=self._batch_size,
                 resume=resume,
+                after_id=after_id,
             )
 
             if not businesses:
                 logger.info("AI enrichment: no more businesses to process")
                 break
+            if not resume:
+                after_id = businesses[-1]["id"]
 
             # Process each business individually (more reliable than batch)
             for biz in businesses:
@@ -462,8 +471,14 @@ class EnrichmentPipeline:
         state: Optional[str] = None,
         limit: int = 100,
         resume: bool = True,
+        after_id: Optional[str] = None,
     ) -> List[dict]:
-        """Fetch businesses that have a website but need web enrichment."""
+        """Fetch businesses that have a website but need web enrichment.
+
+        With resume, rows tried recently or 3+ times are skipped. Without it, rows are
+        walked in id order past after_id: a row the scrape could not enrich still has
+        no email, so without the cursor the same rows would come back every batch.
+        """
         ph = self._db.placeholder
 
         query = """
@@ -479,12 +494,15 @@ class EnrichmentPipeline:
             interval_expr = self._db.interval_ago(7)
             query += f" AND (last_enriched_at IS NULL OR last_enriched_at < {interval_expr})"
             query += " AND (enrichment_attempts < 3 OR enrichment_attempts IS NULL)"
+        elif after_id is not None:
+            query += f" AND id > {ph}"
+            params.append(after_id)
 
         if state:
             query += f" AND state = {ph}"
             params.append(state.upper())
 
-        query += f" ORDER BY name ASC LIMIT {ph}"
+        query += f" ORDER BY {'name' if resume else 'id'} ASC LIMIT {ph}"
         params.append(limit)
 
         try:
@@ -498,8 +516,13 @@ class EnrichmentPipeline:
         state: Optional[str] = None,
         limit: int = 5,
         resume: bool = True,
+        after_id: Optional[str] = None,
     ) -> List[dict]:
-        """Fetch businesses that need AI enrichment (no summary yet)."""
+        """Fetch businesses that need AI enrichment (no summary yet).
+
+        Without resume, rows are walked in id order past after_id (see
+        _fetch_businesses_for_scrape).
+        """
         ph = self._db.placeholder
 
         query = """
@@ -512,12 +535,15 @@ class EnrichmentPipeline:
 
         if resume:
             query += " AND (enrichment_attempts < 3 OR enrichment_attempts IS NULL)"
+        elif after_id is not None:
+            query += f" AND id > {ph}"
+            params.append(after_id)
 
         if state:
             query += f" AND state = {ph}"
             params.append(state.upper())
 
-        query += f" ORDER BY name ASC LIMIT {ph}"
+        query += f" ORDER BY {'name' if resume else 'id'} ASC LIMIT {ph}"
         params.append(limit)
 
         try:

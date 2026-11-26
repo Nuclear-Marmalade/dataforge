@@ -137,7 +137,7 @@ forge enrich --mode both --workers 50              # both
 | `FORGE_DB_NAME` | Yes | `forge` | Database name |
 | `ANTHROPIC_API_KEY` | No | -- | For Haiku audit agent only |
 | `SAM_GOV_API_KEY` | No | -- | Free key from [api.data.gov](https://api.data.gov) |
-| `FORGE_SMTP_FROM` | No | `verify@yourdomain.com` | SMTP verification identity |
+| `FORGE_SMTP_FROM` | No | empty (null sender `<>`) | SMTP verification identity; set it to an address on a domain you own if a server refuses the null sender |
 | `FORGE_SMTP_EHLO` | No | `yourdomain.com` | EHLO domain |
 
 ---

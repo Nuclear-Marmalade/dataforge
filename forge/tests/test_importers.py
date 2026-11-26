@@ -10,6 +10,7 @@ from forge.importers.fcc_uls import (
     COL_ENTITY_TYPE,
     COL_PHONE,
     COL_STATE,
+    _match_row_to_indexes,
     build_name_state_index,
     build_phone_index,
     normalize_name,
@@ -18,6 +19,7 @@ from forge.importers.fcc_uls import (
 from forge.importers.fcc_uls import (
     normalize_phone as fcc_normalize_phone,
 )
+from forge.importers.location import same_location
 from forge.importers.npi_registry import (
     _match_npi_results,
     _write_npi_match,
@@ -245,6 +247,96 @@ class TestFCCIndexes:
         assert "ACME|FL" in idx
         assert "WIDGET|CA" in idx
 
+    def test_name_index_keeps_every_location(self):
+        records = [
+            {"name_normalized": "ACME", "state": "FL", "city": "TAMPA", "zip": "33602"},
+            {"name_normalized": "ACME", "state": "FL", "city": "MIAMI", "zip": "33101"},
+        ]
+        idx = build_name_state_index(records)
+        assert [r["city"] for r in idx["ACME|FL"]] == ["TAMPA", "MIAMI"]
+
+
+def _fcc_rec(email, city, zip_code, name="ACME", state="FL", phone=None):
+    return {
+        "name": name,
+        "name_normalized": name,
+        "phone": phone,
+        "email": email,
+        "city": city,
+        "state": state,
+        "zip": zip_code,
+    }
+
+
+class TestFCCMatchRow:
+    def _match(self, row, records):
+        batch: list = []
+        _match_row_to_indexes(
+            row, build_phone_index(records), build_name_state_index(records), batch
+        )
+        return batch
+
+    def test_name_match_picks_same_zip(self):
+        records = [
+            _fcc_rec("miami@acme.com", "MIAMI", "33101"),
+            _fcc_rec("tampa@acme.com", "TAMPA", "33602"),
+        ]
+        row = {
+            "id": "b1",
+            "name": "Acme",
+            "phone": "",
+            "city": "Tampa",
+            "state": "FL",
+            "zip": "33602",
+        }
+        assert self._match(row, records) == [
+            ("tampa@acme.com", "fcc_uls_name_location", "b1", "name_location")
+        ]
+
+    def test_name_match_in_another_city_is_rejected(self):
+        records = [_fcc_rec("miami@acme.com", "MIAMI", "33101")]
+        row = {
+            "id": "b1",
+            "name": "Acme",
+            "phone": "",
+            "city": "Tampa",
+            "state": "FL",
+            "zip": "33602",
+        }
+        assert self._match(row, records) == []
+
+    def test_name_match_without_business_location_is_rejected(self):
+        records = [_fcc_rec("miami@acme.com", "MIAMI", "33101")]
+        row = {"id": "b1", "name": "Acme", "phone": "", "city": "", "state": "FL", "zip": ""}
+        assert self._match(row, records) == []
+
+    def test_phone_match_needs_no_location(self):
+        records = [_fcc_rec("miami@acme.com", "MIAMI", "33101", phone="3055550100")]
+        row = {
+            "id": "b1",
+            "name": "Other",
+            "phone": "305-555-0100",
+            "city": "",
+            "state": "FL",
+            "zip": "",
+        }
+        assert self._match(row, records)[0][3] == "phone"
+
+
+class TestSameLocation:
+    def test_same_zip(self):
+        assert same_location("33602", "TAMPA", "33602-1234", "Tampa")
+
+    def test_different_zip_same_city_is_not_same_place(self):
+        assert not same_location("77002", "HOUSTON", "77098", "HOUSTON")
+
+    def test_city_used_when_a_zip_is_missing(self):
+        assert same_location("", "St. Petersburg", "33701", "ST PETERSBURG")
+
+    def test_unknown_location_never_matches(self):
+        assert not same_location("", "", "", "")
+        assert not same_location(None, None, "33602", "TAMPA")
+
 
 # ---------------------------------------------------------------------------
 # NPI Registry: normalize_phone
@@ -400,11 +492,20 @@ _NPI_BASIC = {
 }
 
 
-def _npi_result(basic, phone="8132881999", number="1366540270"):
+def _npi_result(
+    basic, phone="8132881999", number="1366540270", city="TAMPA", postal_code="336062145"
+):
     return {
         "number": number,
         "basic": basic,
-        "addresses": [{"address_purpose": "LOCATION", "telephone_number": phone}],
+        "addresses": [
+            {
+                "address_purpose": "LOCATION",
+                "telephone_number": phone,
+                "city": city,
+                "postal_code": postal_code,
+            }
+        ],
         "taxonomies": [{"primary": True, "desc": "Dentist"}],
     }
 
@@ -466,6 +567,52 @@ class TestMatchNPIResults:
             None,
             None,
         )
+
+    def test_name_match_at_same_zip(self):
+        stats = _empty_npi_stats()
+        npi, _, official = _match_npi_results(
+            [_npi_result(_NPI_BASIC)],
+            None,
+            "Adam Diasti DDS & Associates P.C.",
+            stats,
+            zip_code="33606",
+            city="Tampa",
+        )
+        assert npi == "1366540270"
+        assert official["name"] == "PATRICIA A HUIE"
+        assert stats["name_matches"] == 1
+
+    def test_same_name_other_location_is_rejected(self):
+        # A chain: the name matches but the NPI record is a branch in another town.
+        stats = _empty_npi_stats()
+        result = _match_npi_results(
+            [_npi_result(_NPI_BASIC, city="ORLANDO", postal_code="32801")],
+            None,
+            "ADAM DIASTI DDS & ASSOCIATES P.C.",
+            stats,
+            zip_code="33606",
+            city="TAMPA",
+        )
+        assert result == (None, None, None)
+        assert stats["name_matches"] == 0
+
+    def test_picks_the_branch_at_this_location(self):
+        stats = _empty_npi_stats()
+        branches = [
+            _npi_result(_NPI_BASIC, number="1111111111", city="ORLANDO", postal_code="32801"),
+            _npi_result(_NPI_BASIC, number="2222222222", city="TAMPA", postal_code="33606"),
+        ]
+        npi, _, _ = _match_npi_results(
+            branches, None, "ADAM DIASTI DDS & ASSOCIATES P.C.", stats, zip_code="33606"
+        )
+        assert npi == "2222222222"
+
+    def test_name_match_without_business_location_is_rejected(self):
+        stats = _empty_npi_stats()
+        result = _match_npi_results(
+            [_npi_result(_NPI_BASIC)], None, "ADAM DIASTI DDS & ASSOCIATES P.C.", stats
+        )
+        assert result == (None, None, None)
 
 
 class TestWriteNPIMatch:

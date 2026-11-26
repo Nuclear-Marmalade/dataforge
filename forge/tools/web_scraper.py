@@ -20,26 +20,34 @@ from aiolimiter import AsyncLimiter
 logger = logging.getLogger("forge.tools.web_scraper")
 
 # ── Email extraction patterns ────────────────────────────────────────────────
+# Every part is length-bounded (local 64, domain 253, TLD 24) and a match may only start
+# where a run of address characters starts. Unbounded `[...]+@` retries from every position
+# of a long run without an @ (an inline base64 image), which is quadratic: a few hundred KB
+# blocked the event loop for minutes, and with it every site's timeout.
+_LOCAL = r"(?<![a-zA-Z0-9._%+\-])[a-zA-Z0-9._%+\-]{1,64}"
+_DOMAIN = r"[a-zA-Z0-9.\-]{1,253}"
+_TLD = r"[a-zA-Z]{2,24}"
 
-_EMAIL_RE = re.compile(
-    r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}",
-    re.IGNORECASE,
-)
+_EMAIL_RE = re.compile(_LOCAL + "@" + _DOMAIN + r"\." + _TLD, re.IGNORECASE)
 
-_MAILTO_RE = re.compile(r"mailto:([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})", re.IGNORECASE)
+_MAILTO_RE = re.compile(r"mailto:(" + _LOCAL + "@" + _DOMAIN + r"\." + _TLD + ")", re.IGNORECASE)
 
 # Cloudflare email obfuscation pattern
 _CF_EMAIL_RE = re.compile(r'data-cfemail="([a-fA-F0-9]+)"')
 
 # Obfuscated email patterns: [at], (at), [dot], (dot) variations
 _OBFUSCATED_EMAIL_RE = re.compile(
-    r"[a-zA-Z0-9._%+\-]+\s*[\[\(]\s*(?:at|AT)\s*[\]\)]\s*[a-zA-Z0-9.\-]+\s*[\[\(]\s*(?:dot|DOT)\s*[\]\)]\s*[a-zA-Z]{2,}",
+    _LOCAL
+    + r"\s{0,3}[\[\(]\s{0,3}(?:at|AT)\s{0,3}[\]\)]\s{0,3}"
+    + _DOMAIN
+    + r"\s{0,3}[\[\(]\s{0,3}(?:dot|DOT)\s{0,3}[\]\)]\s{0,3}"
+    + _TLD,
     re.IGNORECASE,
 )
 
 # HTML numeric entity for @ (&#64;) and . (&#46;)
 _HTML_ENTITY_EMAIL_RE = re.compile(
-    r"[a-zA-Z0-9._%+\-]+(?:&#64;|&#x40;)[a-zA-Z0-9.\-]+(?:&#46;|&#x2e;)[a-zA-Z]{2,}",
+    _LOCAL + "(?:&#64;|&#x40;)" + _DOMAIN + "(?:&#46;|&#x2e;)" + _TLD,
     re.IGNORECASE,
 )
 
@@ -63,7 +71,91 @@ _FAKE_EMAIL_DOMAINS = {
     "wp.com",
     "sentry-next.wixpress.com",
     "changedetection.io",
+    "godaddy.com",  # filler@godaddy.com in GoDaddy templates
+    "mystore.com",  # hi@mystore.com in Square Online templates
 }
+
+# Local parts that only appear as form or template placeholders.
+_PLACEHOLDER_LOCAL_PARTS = {
+    "email",
+    "example",
+    "filler",
+    "firstname.lastname",
+    "first.last",
+    "jane.doe",
+    "janedoe",
+    "john.doe",
+    "johndoe",
+    "name",
+    "someone",
+    "test",
+    "user",
+    "username",
+    "your.email",
+    "your.name",
+    "youremail",
+    "yourname",
+}
+
+# Free and ISP mail services. Many small businesses use one instead of their own domain.
+_PERSONAL_MAIL_DOMAINS = {
+    "aol.com",
+    "att.net",
+    "bellsouth.net",
+    "centurylink.net",
+    "charter.net",
+    "comcast.net",
+    "cox.net",
+    "earthlink.net",
+    "embarqmail.com",
+    "frontier.com",
+    "frontiernet.net",
+    "gmail.com",
+    "gmx.com",
+    "googlemail.com",
+    "hotmail.com",
+    "icloud.com",
+    "live.com",
+    "mac.com",
+    "me.com",
+    "msn.com",
+    "optonline.net",
+    "outlook.com",
+    "proton.me",
+    "protonmail.com",
+    "q.com",
+    "roadrunner.com",
+    "rocketmail.com",
+    "rr.com",
+    "sbcglobal.net",
+    "suddenlink.net",
+    "verizon.net",
+    "windstream.net",
+    "yahoo.com",
+    "ymail.com",
+    "zoho.com",
+}
+
+# Site builders and link pages: the business has no domain of its own there, so an
+# address on any domain may be the business's.
+_SHARED_SITE_HOSTS = {
+    "beacons.ai",
+    "blogspot.com",
+    "business.site",
+    "carrd.co",
+    "godaddysites.com",
+    "linktr.ee",
+    "myshopify.com",
+    "square.site",
+    "squarespace.com",
+    "webflow.io",
+    "weebly.com",
+    "wixsite.com",
+    "wordpress.com",
+}
+
+# Second-level labels under a two-letter country code (acme.co.uk, acme.com.au).
+_COUNTRY_SECOND_LEVELS = {"ac", "co", "com", "edu", "gov", "net", "org"}
 
 # ── Tech stack detection patterns (from HTTP headers + HTML) ─────────────────
 
@@ -202,6 +294,56 @@ def _bare_host(host: str) -> str:
     return host[4:] if host.startswith("www.") else host
 
 
+def _domain_in(domain: str, domains: Set[str]) -> bool:
+    """True when the domain or one of its parent domains is in the set."""
+    parts = domain.lower().split(".")
+    return any(".".join(parts[i:]) in domains for i in range(len(parts) - 1))
+
+
+def _same_or_subdomain(a: str, b: str) -> bool:
+    return bool(a) and bool(b) and (a == b or a.endswith("." + b) or b.endswith("." + a))
+
+
+def _name_label(host: str) -> str:
+    """The name part of a domain, letters and digits only: shop.acme-co.co.uk -> acmeco.
+
+    Approximate (no public-suffix list): handles plain TLDs and two-letter country
+    codes with a second level such as co.uk or com.au.
+    """
+    parts = _bare_host(host).split(".")
+    if len(parts) >= 3 and len(parts[-1]) == 2 and parts[-2] in _COUNTRY_SECOND_LEVELS:
+        label = parts[-3]
+    else:
+        label = parts[-2] if len(parts) >= 2 else parts[0]
+    return re.sub(r"[^a-z0-9]", "", label)
+
+
+def keep_business_emails(emails: Iterable[str], site_host: str) -> List[str]:
+    """Drop addresses that belong to some other organisation.
+
+    Keeps an address on the site's own domain, on a free or ISP mail service, or on a
+    domain whose name contains (or is contained in) the site's name, at least five
+    characters long, like info@hydralifewater.com on hydralifewaterservices.com.
+    Drops the rest: a web designer's credit, a regulator, a parent company, spam
+    injected into the page. On site builders and link pages every domain is kept,
+    because the business has no domain of its own there.
+    """
+    site = _bare_host(site_host)
+    shared_site = _domain_in(site, _SHARED_SITE_HOSTS)
+    site_label = _name_label(site)
+
+    def belongs(email: str) -> bool:
+        domain = email.partition("@")[2].lower()
+        if shared_site or _same_or_subdomain(domain, site):
+            return True
+        if _domain_in(domain, _PERSONAL_MAIL_DOMAINS):
+            return True
+        short, long_ = sorted((_name_label(domain), site_label), key=len)
+        return len(short) >= 5 and short in long_
+
+    return [e for e in emails if belongs(e)]
+
+
 def rank_emails(emails: Iterable[str], site_host: str) -> List[str]:
     """Order emails best contact first, keeping every one.
 
@@ -211,9 +353,7 @@ def rank_emails(emails: Iterable[str], site_host: str) -> List[str]:
     site = _bare_host(site_host)
 
     def own_domain(domain: str) -> bool:
-        return bool(site) and (
-            domain == site or site.endswith("." + domain) or domain.endswith("." + site)
-        )
+        return _same_or_subdomain(domain, site)
 
     def sort_key(email: str) -> Tuple[bool, bool, str]:
         local, _, domain = email.partition("@")
@@ -252,11 +392,15 @@ class AsyncWebScraper:
         connect_timeout: float = 3.0,
         total_timeout: float = 10.0,
         rate_limit: float = 100.0,
+        site_timeout: float = 60.0,
     ):
         self._max_concurrent = max_concurrent
         self._max_per_host = max_per_host
         self._connect_timeout = connect_timeout
         self._total_timeout = total_timeout
+        # total_timeout caps each request; site_timeout caps the whole site, which can
+        # chain the home page, the plain-HTTP fallback and every contact path.
+        self._site_timeout = site_timeout
         self._semaphore: Optional[asyncio.Semaphore] = None
         self._session: Optional[aiohttp.ClientSession] = None
         self._rate_limiter = AsyncLimiter(rate_limit, 1)  # rate_limit req/sec
@@ -313,7 +457,7 @@ class AsyncWebScraper:
         emails.update(self._extract_emails(html))
 
         if not emails:
-            base = f"{urlparse(resp_url).scheme}://{urlparse(resp_url).hostname}"
+            base = f"{urlparse(resp_url).scheme}://{urlparse(resp_url).netloc}"
             contact_emails = await self._crawl_contact_pages(session, base, domain)
             emails.update(contact_emails)
 
@@ -321,8 +465,9 @@ class AsyncWebScraper:
         emails.update(self._decode_obfuscated_emails(html))
         emails.update(self._extract_footer_emails(html))
 
-        # Rank against the site we landed on, so a redirect to a new brand domain still counts.
-        data["emails"] = rank_emails(emails, urlparse(resp_url).hostname or domain)
+        # Judge against the site we landed on, so a redirect to a new brand domain still counts.
+        site = urlparse(resp_url).hostname or domain
+        data["emails"] = rank_emails(keep_business_emails(emails, site), site)
         return data
 
     async def _handle_ssl_fallback(
@@ -349,8 +494,9 @@ class AsyncWebScraper:
                         if cms in result["tech_stack"]:
                             result["cms_detected"] = cms
                             break
+                    site = urlparse(url).hostname or ""
                     result["emails"] = rank_emails(
-                        self._extract_emails(html), urlparse(url).hostname or ""
+                        keep_business_emails(self._extract_emails(html), site), site
                     )
                 else:
                     result["status"] = f"http_{resp.status}"
@@ -411,16 +557,27 @@ class AsyncWebScraper:
         try:
             assert self._semaphore is not None
             async with self._semaphore:
-                await self._rate_limiter.acquire()
                 domain = urlparse(url).hostname or ""
-                await self._domain_rate_limit(domain)
-                await self._fetch_and_extract(session, url, domain, result)
+                await asyncio.wait_for(
+                    self._scrape_site(session, url, domain, result), timeout=self._site_timeout
+                )
+        except asyncio.TimeoutError:
+            result["status"] = "site_timeout"
+            logger.debug("Site limit (%.0fs) reached for %s", self._site_timeout, url)
         except Exception as e:
             result["status"] = "error"
             result["error"] = str(e)[:200]
             logger.debug("Scrape error for %s: %s", url, e)
 
         return result
+
+    async def _scrape_site(
+        self, session: aiohttp.ClientSession, url: str, domain: str, result: Dict[str, Any]
+    ) -> None:
+        """Every request for one site; scrape_one bounds the whole thing by site_timeout."""
+        await self._rate_limiter.acquire()
+        await self._domain_rate_limit(domain)
+        await self._fetch_and_extract(session, url, domain, result)
 
     async def scrape_batch(self, urls: List[str]) -> List[Dict[str, Any]]:
         """
@@ -580,8 +737,8 @@ class AsyncWebScraper:
         """Validate an extracted email address."""
         if not email or "@" not in email:
             return False
-        domain = email.split("@")[-1]
-        if domain in _FAKE_EMAIL_DOMAINS:
+        local, _, domain = email.lower().rpartition("@")
+        if _domain_in(domain, _FAKE_EMAIL_DOMAINS) or local in _PLACEHOLDER_LOCAL_PARTS:
             return False
         if email.endswith((".png", ".jpg", ".gif", ".svg", ".css", ".js")):
             return False

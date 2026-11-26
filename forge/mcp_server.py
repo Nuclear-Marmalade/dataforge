@@ -188,24 +188,28 @@ def _get_db():
 # ── Tool Implementations ────────────────────────────────────────────────────
 
 
+_DISCOVERED_FIELDS = (
+    "name",
+    "address_line1",
+    "city",
+    "state",
+    "zip",
+    "phone",
+    "website_url",
+    "industry",
+    "sub_industry",
+    "latitude",
+    "longitude",
+)
+
+
 def _insert_discovered_businesses(db, results: list) -> int:
     """Insert discovered businesses into the DB. Returns count inserted."""
     inserted = 0
     for biz in results:
         try:
-            record = {
-                "name": biz.get("name"),
-                "address_line1": biz.get("address"),
-                "city": biz.get("city"),
-                "state": biz.get("state"),
-                "zip": biz.get("zip"),
-                "phone": biz.get("phone"),
-                "website_url": biz.get("website"),
-                "industry": biz.get("category"),
-                "latitude": biz.get("lat"),
-                "longitude": biz.get("lon"),
-            }
-            record = {k: v for k, v in record.items() if v is not None}
+            # Discovery results already use the businesses table's column names.
+            record = {k: biz.get(k) for k in _DISCOVERED_FIELDS if biz.get(k) is not None}
             if record.get("name"):
                 db.upsert_business(record)
                 inserted += 1

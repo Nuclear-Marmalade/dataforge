@@ -1,4 +1,6 @@
-"""FCC ULS importer. Matches licensee emails to businesses by phone or name+state."""
+"""FCC ULS importer. Matches licensee emails to businesses by phone, or by name at the same
+ZIP (or city).
+"""
 
 from __future__ import annotations
 
@@ -9,6 +11,8 @@ import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from forge.importers.location import same_location
 
 logger = logging.getLogger("forge.importers.fcc_uls")
 
@@ -126,13 +130,11 @@ def build_phone_index(records: List[Dict]) -> Dict[str, Dict]:
     return index
 
 
-def build_name_state_index(records: List[Dict]) -> Dict[str, Dict]:
-    """Build a (normalized_name, state) -> record index."""
-    index = {}
+def build_name_state_index(records: List[Dict]) -> Dict[str, List[Dict]]:
+    """Build a (normalized_name, state) -> every record with that name in the state."""
+    index: Dict[str, List[Dict]] = {}
     for rec in records:
-        key = f"{rec['name_normalized']}|{rec['state']}"
-        if key not in index:
-            index[key] = rec
+        index.setdefault(f"{rec['name_normalized']}|{rec['state']}", []).append(rec)
     return index
 
 
@@ -250,10 +252,14 @@ def _parse_all_en_files(data_dir: str) -> List[Dict]:
 def _match_row_to_indexes(
     row: Dict,
     phone_index: Dict[str, Dict],
-    name_index: Dict[str, Dict],
+    name_index: Dict[str, List[Dict]],
     update_batch: List[tuple],
 ) -> None:
-    """Match a single business row against FCC phone and name indexes."""
+    """Match a single business row against FCC phone and name indexes.
+
+    A name match must be at the same ZIP (or city), so a same-named licensee elsewhere in
+    the state never lends this business its email.
+    """
     biz_phone = normalize_phone(row["phone"] or "")
     biz_name_norm = normalize_name(row["name"] or "")
     biz_state = (row["state"] or "").upper()
@@ -266,10 +272,11 @@ def _match_row_to_indexes(
         match_type = "phone"
 
     if not matched_email:
-        key = f"{biz_name_norm}|{biz_state}"
-        if key in name_index:
-            matched_email = name_index[key]["email"]
-            match_type = "name_state"
+        for rec in name_index.get(f"{biz_name_norm}|{biz_state}", []):
+            if same_location(row.get("zip"), row.get("city"), rec["zip"], rec["city"]):
+                matched_email = rec["email"]
+                match_type = "name_location"
+                break
 
     if matched_email:
         update_batch.append(
@@ -288,12 +295,12 @@ def _fetch_unenriched_page(
     """Fetch a page of businesses without email for FCC matching."""
     if last_id is None:
         return db.fetch_dicts(
-            f"SELECT id, name, phone, city, state FROM businesses "
+            f"SELECT id, name, phone, city, state, zip FROM businesses "
             f"WHERE (email IS NULL OR email = '') ORDER BY id LIMIT {ph}",
             (fetch_size,),
         )
     return db.fetch_dicts(
-        f"SELECT id, name, phone, city, state FROM businesses "
+        f"SELECT id, name, phone, city, state, zip FROM businesses "
         f"WHERE id > {uuid_cast} AND (email IS NULL OR email = '') ORDER BY id LIMIT {ph}",
         (last_id, fetch_size),
     )
@@ -302,7 +309,7 @@ def _fetch_unenriched_page(
 def _scan_and_match(
     db,
     phone_index: Dict[str, Dict],
-    name_index: Dict[str, Dict],
+    name_index: Dict[str, List[Dict]],
     stats: Dict[str, int],
     last_id: Optional[str],
     total_checked: int,

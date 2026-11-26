@@ -3,6 +3,7 @@
 from forge.importers.sam_gov import (
     _build_params,
     _extract_entity,
+    _process_entities,
     normalize_name,
 )
 
@@ -213,3 +214,56 @@ class TestExtractEntity:
         result = _extract_entity(entity)
         # No state -> returns None
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Tests: _process_entities (a name match must be at the same location)
+# ---------------------------------------------------------------------------
+
+
+def _sam_entity(city, zip_code, org_name="ACME CORP", email="poc@acme.com"):
+    return {
+        "entityRegistration": {"legalBusinessName": org_name},
+        "coreData": {
+            "physicalAddress": {"stateOrProvinceCode": "FL", "city": city, "zipCode": zip_code}
+        },
+        "pointsOfContact": {
+            "governmentBusinessPOC": {"email": email, "firstName": "Jo", "lastName": "Lee"}
+        },
+    }
+
+
+def _sam_stats():
+    return {"entities_with_email": 0, "matches_found": 0}
+
+
+class TestProcessEntities:
+    def _index(self):
+        return {
+            "ACME|FL": [
+                {"id": "miami", "name": "Acme", "state": "FL", "city": "MIAMI", "zip": "33101"},
+                {"id": "tampa", "name": "Acme", "state": "FL", "city": "TAMPA", "zip": "33602"},
+            ]
+        }
+
+    def test_contact_goes_to_the_business_at_the_same_zip(self):
+        batch: list = []
+        stats = _sam_stats()
+        _process_entities([_sam_entity("TAMPA", "33602")], self._index(), batch, stats)
+        assert batch == [("poc@acme.com", "Jo Lee", "poc@acme.com", "tampa")]
+        assert stats["matches_found"] == 1
+
+    def test_same_name_in_another_city_gets_nothing(self):
+        batch: list = []
+        stats = _sam_stats()
+        _process_entities([_sam_entity("ORLANDO", "32801")], self._index(), batch, stats)
+        assert batch == []
+        assert stats["matches_found"] == 0
+
+    def test_each_business_written_once(self):
+        batch: list = []
+        index = self._index()
+        entity = _sam_entity("TAMPA", "33602")
+        _process_entities([entity, entity], index, batch, _sam_stats())
+        assert len(batch) == 1
+        assert [b["id"] for b in index["ACME|FL"]] == ["miami"]

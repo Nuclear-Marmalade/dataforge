@@ -1,11 +1,16 @@
-"""Tests for forge.tools.web_scraper (no network calls)."""
+"""Tests for forge.tools.web_scraper (no network calls; one test uses a localhost server)."""
+
+import asyncio
+import time
 
 import pytest
+from aiohttp import web
 
 from forge.tools.web_scraper import (
     AsyncWebScraper,
     WebScrapeTool,
     decode_cf_email,
+    keep_business_emails,
     rank_emails,
 )
 
@@ -95,6 +100,22 @@ class TestIsValidEmail:
 
     def test_rejects_too_long(self, scraper):
         assert scraper._is_valid_email("a" * 250 + "@x.com") is False
+
+    def test_rejects_subdomains_of_fake_domains(self, scraper):
+        # Wix pages embed error-tracker IDs that look like addresses.
+        assert (
+            scraper._is_valid_email("2062d0a4929b45348643784b5cb39c36@sentry.wixpress.com") is False
+        )
+
+    def test_rejects_template_placeholders(self, scraper):
+        for email in [
+            "email@gmail.com",
+            "filler@godaddy.com",
+            "hi@mystore.com",
+            "youremail@gmail.com",
+            "name@biz.com",
+        ]:
+            assert scraper._is_valid_email(email) is False, email
 
 
 # ---------------------------------------------------------------------------
@@ -393,3 +414,148 @@ class TestRankEmails:
 
     def test_empty(self):
         assert rank_emails([], "biz.com") == []
+
+
+# ---------------------------------------------------------------------------
+# Tests: email scans stay linear on long runs (inline base64 froze the event loop)
+# ---------------------------------------------------------------------------
+
+
+class TestEmailScanSpeed:
+    def test_long_run_without_at_sign_scans_fast(self, scraper):
+        # A 200 KB base64-like run: the unbounded patterns took minutes on this.
+        page = '<img src="data:image/png;base64,' + "A" * 200_000 + '">'
+        start = time.monotonic()
+        scraper._extract_emails(page)
+        scraper._decode_obfuscated_emails(page)
+        scraper._extract_footer_emails(page)
+        scraper._extract_mailto(page)
+        assert time.monotonic() - start < 2
+
+    def test_addresses_still_found(self, scraper):
+        page = (
+            "<p>Email: info@biz.com.</p>"
+            '<a href="mailto:Sales@Biz.com">x</a>'
+            "<p>owner [at] biz [dot] com</p>"
+            "<p>hello&#64;biz&#46;com</p>"
+        )
+        found = (
+            scraper._extract_emails(page)
+            | scraper._extract_mailto(page)
+            | scraper._decode_obfuscated_emails(page)
+        )
+        assert {"info@biz.com", "sales@biz.com", "owner@biz.com", "hello@biz.com"} <= found
+
+
+# ---------------------------------------------------------------------------
+# Tests: keep_business_emails (cases from a 500-business live test)
+# ---------------------------------------------------------------------------
+
+
+class TestKeepBusinessEmails:
+    def test_keeps_own_domain_and_subdomains(self):
+        emails = ["info@biz.com", "sales@shop.biz.com"]
+        assert keep_business_emails(emails, "www.biz.com") == emails
+
+    def test_keeps_free_and_isp_mail(self):
+        emails = [
+            "palomalashbeauty@gmail.com",
+            "davidcityrx@windstream.net",
+            "owner@tampabay.rr.com",
+        ]
+        assert keep_business_emails(emails, "palomalashbeauty.com") == emails
+
+    def test_keeps_a_related_brand_domain(self):
+        assert keep_business_emails(["info@hydralifewater.com"], "hydralifewaterservices.com") == [
+            "info@hydralifewater.com"
+        ]
+        assert keep_business_emails(["jobs@skanska.co.uk"], "usa.skanska.com") == [
+            "jobs@skanska.co.uk"
+        ]
+
+    def test_drops_other_organisations(self):
+        cases = [
+            ("contactus@conocophillips.com", "marathon.com"),
+            ("developers@icompasstech.com", "msjc.edu"),
+            ("consumer.complaints@occc.texas.gov", "creditcentralllc.com"),
+            ("support@casino-rain-bet.it", "hahnextremefitness.com"),
+            ("info@heartofcreative.com", "pulsemarketingteam.com"),
+        ]
+        for email, site in cases:
+            assert keep_business_emails([email], site) == [], (email, site)
+
+    def test_short_names_are_not_related(self):
+        assert keep_business_emails(["hi@joes.com"], "joesplumbing.com") == []
+
+    def test_any_domain_on_a_link_page(self):
+        assert keep_business_emails(["services@cleanprostl.com"], "linktr.ee") == [
+            "services@cleanprostl.com"
+        ]
+
+    def test_scraped_page_keeps_only_the_business(self, scraper):
+        html = (
+            '<a href="mailto:hello@acmedental.com">Email us</a>'
+            "<footer>Site by developers@icompasstech.com</footer>"
+        )
+
+        async def go():
+            return await scraper._extract_all_data(
+                html, {}, "https://acmedental.com/", None, "acmedental.com"
+            )
+
+        assert asyncio.run(go())["emails"] == ["hello@acmedental.com"]
+
+
+# ---------------------------------------------------------------------------
+# Tests: one time limit for a whole site
+# ---------------------------------------------------------------------------
+
+
+async def _serve_slow_site(delay: float, hits: list):
+    """Localhost site: the home page has no email, every other page answers after `delay`."""
+
+    async def home(request):
+        return web.Response(
+            text="<html><body>No email here</body></html>", content_type="text/html"
+        )
+
+    async def slow(request):
+        hits.append(request.path)
+        await asyncio.sleep(delay)
+        return web.Response(text="<html>still nothing</html>", content_type="text/html")
+
+    app = web.Application()
+    app.router.add_get("/", home)
+    app.router.add_get("/{tail:.+}", slow)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    return runner, site._server.sockets[0].getsockname()[1]
+
+
+class TestSiteTimeout:
+    def test_slow_contact_pages_are_cut_off_at_the_site_limit(self):
+        # Each contact page answers inside the per-request timeout, so without a
+        # site-wide limit the crawl of every contact path would run for ~10 s.
+        hits: list = []
+
+        async def go():
+            runner, port = await _serve_slow_site(delay=0.6, hits=hits)
+            scraper = AsyncWebScraper(max_concurrent=1, total_timeout=2.0, site_timeout=1.5)
+            try:
+                start = time.monotonic()
+                result = await scraper.scrape_one(f"http://127.0.0.1:{port}/")
+                return result, time.monotonic() - start
+            finally:
+                await scraper.close()
+                await runner.cleanup()
+
+        result, elapsed = asyncio.run(go())
+        assert result["status"] == "site_timeout"
+        assert result["status_code"] == 200
+        assert elapsed < 3
+        assert hits[0] == "/contact"  # the cut-off happened inside the contact-page crawl
+
+    def test_default_site_limit(self):
+        assert AsyncWebScraper()._site_timeout == 60.0

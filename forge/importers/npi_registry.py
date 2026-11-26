@@ -13,6 +13,8 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
+from forge.importers.location import same_location
+
 logger = logging.getLogger("forge.importers.npi_registry")
 
 NPI_API_URL = "https://npiregistry.cms.hhs.gov/api/"
@@ -190,7 +192,7 @@ def _fetch_healthcare_businesses(db, state: str, ph: str) -> List[Dict]:
 
     if db.is_postgres:
         return db.fetch_dicts(
-            f"SELECT id, name, phone, city, state, sub_industry "
+            f"SELECT id, name, phone, city, state, zip, sub_industry "
             f"FROM businesses "
             f"WHERE state = {ph} "
             f"AND (npi_number IS NULL OR npi_number = '') "
@@ -202,7 +204,7 @@ def _fetch_healthcare_businesses(db, state: str, ph: str) -> List[Dict]:
 
     like_clauses = " OR ".join([f"sub_industry LIKE {ph}" for _ in healthcare_keywords])
     return db.fetch_dicts(
-        f"SELECT id, name, phone, city, state, sub_industry "
+        f"SELECT id, name, phone, city, state, zip, sub_industry "
         f"FROM businesses "
         f"WHERE state = {ph} "
         f"AND (npi_number IS NULL OR npi_number = '') "
@@ -236,29 +238,37 @@ def _lookup_npi(name: str, state: str) -> Optional[Dict]:
 
 
 def _match_npi_results(
-    results: List[Dict], phone: Optional[str], name: str, stats: Dict[str, int]
+    results: List[Dict],
+    phone: Optional[str],
+    name: str,
+    stats: Dict[str, int],
+    zip_code: Optional[str] = None,
+    city: Optional[str] = None,
 ) -> tuple:
-    """Match NPI API results against a business by phone or name.
+    """Match NPI API results against a business by phone, or by name at the same location.
+
+    A name match must also share the ZIP (or the city when a ZIP is missing). Chains and
+    common names repeat across a state, and a name-only match would save another
+    branch's authorized official as this business's contact.
 
     Returns (matched_npi, matched_industry, authorized_official) or (None, None, None).
     """
     for r in results:
         basic = r.get("basic", {})
         org_name = basic.get("organization_name", "")
-        addresses = r.get("addresses", [])
         taxonomies = r.get("taxonomies", [])
-
-        npi_phone = None
-        for addr in addresses:
-            if addr.get("address_purpose") == "LOCATION":
-                npi_phone = normalize_phone(addr.get("telephone_number", ""))
-                break
+        location: Dict[str, Any] = next(
+            (a for a in r.get("addresses", []) if a.get("address_purpose") == "LOCATION"), {}
+        )
+        npi_phone = normalize_phone(location.get("telephone_number", ""))
 
         matched_npi = None
         if phone and npi_phone and phone == npi_phone:
             matched_npi = str(r.get("number", ""))
             stats["phone_matches"] += 1
-        elif org_name.upper() == name.upper():
+        elif org_name.upper() == name.upper() and same_location(
+            zip_code, city, location.get("postal_code"), location.get("city")
+        ):
             matched_npi = str(r.get("number", ""))
             stats["name_matches"] += 1
 
@@ -359,7 +369,9 @@ def import_npi_for_state(
         stats["npi_lookups"] += 1
 
         results = data.get("results", [])
-        matched_npi, matched_industry, official = _match_npi_results(results, phone, name, stats)
+        matched_npi, matched_industry, official = _match_npi_results(
+            results, phone, name, stats, zip_code=biz.get("zip"), city=biz.get("city")
+        )
 
         if matched_npi:
             _write_npi_match(db, biz["id"], matched_npi, matched_industry, stats, ph, official)

@@ -12,7 +12,6 @@ import logging
 import os
 import signal
 import tempfile
-import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -77,16 +76,7 @@ def _detect_enrichment_mode(args: argparse.Namespace, config: Any) -> tuple:
 def _run_enrichment_pipeline(
     db: Any, adapter: Any, args: argparse.Namespace, count: int, mode: str, default_workers: int
 ) -> Any:
-    """Run the enrichment pipeline with signal handling."""
-    _stop_requested = threading.Event()
-
-    def handle_signal(signum: int, frame: Any) -> None:
-        warn("\nInterrupted -- stopping gracefully (Ctrl+C again to force quit)...")
-        _stop_requested.set()
-        signal.signal(signal.SIGINT, signal.SIG_DFL)
-
-    signal.signal(signal.SIGINT, handle_signal)
-    signal.signal(signal.SIGTERM, handle_signal)
+    """Run the enrichment pipeline; Ctrl+C or SIGTERM stops it after the current batch."""
     try:
         from forge.enrichment.pipeline import EnrichmentPipeline
 
@@ -97,6 +87,16 @@ def _run_enrichment_pipeline(
             web_scraper_workers=workers,
             batch_size=args.batch_size or 5,
         )
+
+        def handle_signal(signum: int, frame: Any) -> None:
+            warn("\nInterrupted -- stopping gracefully (Ctrl+C again to force quit)...")
+            pipeline.stop()
+            # A second Ctrl+C or SIGTERM takes the default action and ends the process.
+            signal.signal(signal.SIGINT, signal.SIG_DFL)
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+
+        signal.signal(signal.SIGINT, handle_signal)
+        signal.signal(signal.SIGTERM, handle_signal)
         info(f"Enriching {count:,} records with {workers} workers...")
         return pipeline.run(
             mode=mode,
