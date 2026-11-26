@@ -196,6 +196,48 @@ def _add_mcp_parser(subparsers: Any, cmd_func: Any) -> None:
     p.set_defaults(func=cmd_func)
 
 
+def _add_contacts_parser(subparsers: Any, cmd_func: Any) -> None:
+    """Add the 'contacts' subcommand parser."""
+    p = subparsers.add_parser(
+        "contacts",
+        help="Find who to reach at each company, and how",
+        description="Read each company's own public pages (about, team, contact, press, Impressum,\n"
+        "partner programs) and write one spreadsheet row per company: named people with titles,\n"
+        "the marketing person when one is listed, inboxes on the company's domain, phone, contact\n"
+        "form, partner program, LinkedIn and the email format when a named address shows it.\n"
+        "robots.txt is obeyed. Sites that turn automated visits away are read from archived copies.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="Examples:\n  forge contacts zyto.com https://eng3corp.com --output contacts.csv\n"
+        "  forge contacts --file companies.csv --output contacts.csv --people-output people.csv\n",
+    )
+    p.add_argument("targets", nargs="*", help="Company websites (a domain or any page on the site)")
+    p.add_argument(
+        "--file",
+        "-f",
+        type=str,
+        default=None,
+        help="CSV with a website column, or one site per line",
+    )
+    p.add_argument(
+        "--output", "-o", type=str, default=None, help="Output file (default: contacts.csv)"
+    )
+    p.add_argument(
+        "--people-output", type=str, default=None, help="Also write one row per person here"
+    )
+    p.add_argument(
+        "--format", choices=["csv", "json"], default="csv", help="Output format (default: csv)"
+    )
+    p.add_argument(
+        "--no-archive", action="store_true", default=False, help="Never read archived copies"
+    )
+    p.add_argument("--max-pages", type=int, default=8, help="Pages read per company (default: 8)")
+    p.add_argument(
+        "--workers", "-w", type=int, default=4, help="Companies read at once (default: 4)"
+    )
+    _add_global_flags(p)
+    p.set_defaults(func=cmd_func)
+
+
 def build_parser(cmd_handlers: dict) -> argparse.ArgumentParser:
     """Build the complete argument parser with all subcommands.
 
@@ -225,5 +267,7 @@ def build_parser(cmd_handlers: dict) -> argparse.ArgumentParser:
     _add_config_parser(sub, cmd_handlers["config"])
     _add_dashboard_parser(sub, cmd_handlers["dashboard"])
     _add_mcp_parser(sub, cmd_handlers["mcp_server"])
+    if "contacts" in cmd_handlers:
+        _add_contacts_parser(sub, cmd_handlers["contacts"])
 
     return parser

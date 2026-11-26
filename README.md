@@ -19,6 +19,9 @@ forge dashboard
 
 # or discover businesses by ZIP
 forge discover --zip 33602 --enrich --output tampa.csv
+
+# or find who to reach at a list of companies
+forge contacts zyto.com eng3corp.com shiftwave.co --output contacts.csv
 ```
 
 No API keys, no accounts, no credit cards. Runs on your machine.
@@ -53,6 +56,14 @@ Apollo, ZoomInfo, and Clearbit charge $10K-50K/year for data that's largely scra
 **Quality checks**: Haiku audit agent for spot-checking, field validation, COALESCE writes (never clobber existing data), rollback support.
 
 **Ops**: checkpoint-based resume, hourly watchdog, graceful degradation when individual layers fail.
+
+**Who to reach** (`forge contacts`): give it company websites and it reads each company's own public pages (about, team, contact, press, the German Impressum, partner and affiliate programs). It writes one spreadsheet row per company:
+- the named people and their titles, with the marketing or partnerships person when one is listed
+- the inboxes on the company's own domain, best one for a partnership pitch first
+- phone, contact form, partner program (and the affiliate platform it runs on), LinkedIn and other social pages
+- the company's email format, but only when a named person's address shows it; any address built from that format is labelled as built
+
+robots.txt is obeyed, one page at a time per site. A site that turns automated visits away is read from its archived copies in the Wayback Machine. Every item keeps the page it came from. People quoted from other companies (endorsements) are kept apart. A company that publishes no one is reported as "nothing public found", never filled in with guesses.
 
 ---
 
@@ -162,6 +173,10 @@ python -m forge.importers.smtp_verifier --workers 10
 
 # monitoring
 python -m forge.monitor
+
+# who to reach: one row per company, and optionally one row per person
+forge contacts --file companies.csv --output contacts.csv --people-output people.csv
+# a company that writes from another domain: add an email_domain column to the CSV
 ```
 
 ---
