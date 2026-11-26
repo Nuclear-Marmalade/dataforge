@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import urlparse
 
 import aiohttp
@@ -93,7 +93,7 @@ async def archived_pages(
     limit: int = 4,
 ) -> Tuple[List[Tuple[str, str, str]], Optional[str]]:
     """([(html, original url, snapshot date)], problem). problem is None when the archive answered."""
-    query = {
+    query: Dict[str, Union[str, List[str]]] = {
         "url": f"{host}/*",
         "output": "json",
         "fl": "timestamp,original",
