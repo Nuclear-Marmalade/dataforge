@@ -371,6 +371,15 @@ class TestWebScrapeTool:
 # ---------------------------------------------------------------------------
 
 
+class TestEscapedText:
+    def test_json_escapes_are_not_part_of_an_address(self, scraper):
+        # A theme writes ">" as \u003e inside a script: "\u003einfo@x.com" is info@x.com.
+        html = '<script>var t = "\\u003cp\\u003einfo@airnergy.com\\u003c/p\\u003e";</script>'
+        emails = scraper._extract_emails(html)
+        assert "info@airnergy.com" in emails
+        assert not any(e.startswith("u003") for e in emails)
+
+
 class TestExtractFooterEmails:
     def test_finds_email_in_footer(self, scraper):
         # Build a page where the email is in the last 20%
@@ -384,6 +393,18 @@ class TestExtractFooterEmails:
         html = "x" * 100 + "<footer>No emails here</footer>"
         emails = scraper._extract_footer_emails(html)
         assert len(emails) == 0
+
+    def test_an_address_cut_by_the_footer_line_is_not_shortened(self, scraper):
+        # The footer starts at 80% of the page; that point falls inside "jane.roe@".
+        tail = "jane.roe@acmelight.com"
+        html = next(
+            page
+            for page in ("<p>" + " " * n + tail + "</p>" for n in range(400))
+            if page[int(len(page) * 0.8) :].startswith("roe@")
+        )
+        emails = scraper._extract_footer_emails(html)
+        assert "roe@acmelight.com" not in emails
+        assert "jane.roe@acmelight.com" in emails
 
 
 # ---------------------------------------------------------------------------
@@ -532,6 +553,52 @@ async def _serve_slow_site(delay: float, hits: list):
     site = web.TCPSite(runner, "127.0.0.1", 0)
     await site.start()
     return runner, site._server.sockets[0].getsockname()[1]
+
+
+async def _serve_streamed_page(body: str, chunk: int):
+    """Localhost site whose home page arrives in many pieces, the way a big page does."""
+
+    async def home(request):
+        resp = web.StreamResponse(headers={"Content-Type": "text/html"})
+        await resp.prepare(request)
+        data = body.encode()
+        for i in range(0, len(data), chunk):
+            await resp.write(data[i : i + chunk])
+            await asyncio.sleep(0.001)
+        await resp.write_eof()
+        return resp
+
+    app = web.Application()
+    app.router.add_get("/", home)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    return runner, site._server.sockets[0].getsockname()[1]
+
+
+class TestWholePageIsRead:
+    def test_email_at_the_bottom_of_a_page_sent_in_pieces(self):
+        # aiohttp's content.read(n) returns the first piece that arrived, not n bytes; a page
+        # sent in pieces was cut there and its footer never read.
+        page = (
+            "<html><body>"
+            + "<p>filler text</p>" * 20000
+            + "acmedentaltampa@gmail.com</body></html>"
+        )
+
+        async def go():
+            runner, port = await _serve_streamed_page(page, chunk=16 * 1024)
+            scraper = AsyncWebScraper(max_concurrent=1, total_timeout=10.0)
+            try:
+                return await scraper.scrape_one(f"http://127.0.0.1:{port}/")
+            finally:
+                await scraper.close()
+                await runner.cleanup()
+
+        result = asyncio.run(go())
+        assert result["status"] == "ok"
+        assert result["emails"] == ["acmedentaltampa@gmail.com"]
 
 
 class TestSiteTimeout:

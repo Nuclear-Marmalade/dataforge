@@ -566,6 +566,7 @@ BANNER = r"""
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the complete argument parser with all subcommands."""
+    from forge.cli_contacts import cmd_contacts
     from forge.cli_parsers import build_parser as _build
 
     return _build(
@@ -578,6 +579,7 @@ def build_parser() -> argparse.ArgumentParser:
             "config": cmd_config,
             "dashboard": cmd_dashboard,
             "mcp_server": cmd_mcp_server,
+            "contacts": cmd_contacts,
         }
     )
 

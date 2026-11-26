@@ -35,6 +35,17 @@ _MAILTO_RE = re.compile(r"mailto:(" + _LOCAL + "@" + _DOMAIN + r"\." + _TLD + ")
 # Cloudflare email obfuscation pattern
 _CF_EMAIL_RE = re.compile(r'data-cfemail="([a-fA-F0-9]+)"')
 
+# JavaScript/JSON escapes of one character ("\u003e" for ">", "\u0040" for "@"). Left in place, the
+# hex digits join the address: "\u003einfo@x.com" was read as "u003einfo@x.com".
+_JS_ESCAPE_RE = re.compile(r"\\u00([0-9a-fA-F]{2})")
+
+
+def _decode_js_escapes(html: str) -> str:
+    if "\\u00" not in html:
+        return html
+    return _JS_ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 16)), html)
+
+
 # Obfuscated email patterns: [at], (at), [dot], (dot) variations
 _OBFUSCATED_EMAIL_RE = re.compile(
     _LOCAL
@@ -363,6 +374,23 @@ def rank_emails(emails: Iterable[str], site_host: str) -> List[str]:
     return sorted(unique, key=sort_key)
 
 
+async def read_capped(content: Any, limit: int) -> bytes:
+    """The whole body up to `limit` bytes.
+
+    aiohttp's content.read(n) returns the first piece that has arrived (at most n bytes), not n
+    bytes: a page that comes in pieces was cut after its first one, so its footer was never read.
+    """
+    chunks: List[bytes] = []
+    size = 0
+    while size < limit:
+        chunk = await content.read(limit - size)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        size += len(chunk)
+    return b"".join(chunks)
+
+
 def decode_cf_email(encoded: str) -> Optional[str]:
     """Decode Cloudflare's __cf_email__ obfuscation."""
     try:
@@ -485,7 +513,7 @@ class AsyncWebScraper:
                 result["site_speed_ms"] = ttfb_ms
                 result["status_code"] = resp.status
                 if resp.status == 200:
-                    body = await resp.content.read(_MAX_BODY_SIZE)
+                    body = await read_capped(resp.content, _MAX_BODY_SIZE)
                     html = body.decode("utf-8", errors="replace")
                     headers = dict(resp.headers)
                     result["status"] = "ok_no_ssl"
@@ -518,7 +546,7 @@ class AsyncWebScraper:
                     result["status"] = f"http_{resp.status}"
                     return
 
-                body = await resp.content.read(_MAX_BODY_SIZE)
+                body = await read_capped(resp.content, _MAX_BODY_SIZE)
                 html = body.decode("utf-8", errors="replace")
                 result["status"] = "ok"
                 extracted = await self._extract_all_data(
@@ -592,6 +620,7 @@ class AsyncWebScraper:
 
     def _extract_mailto(self, html: str) -> Set[str]:
         """Layer 1: Extract emails from mailto: links."""
+        html = _decode_js_escapes(html)
         emails = set()
         for match in _MAILTO_RE.findall(html):
             email = match.lower().strip()
@@ -601,6 +630,7 @@ class AsyncWebScraper:
 
     def _extract_emails(self, html: str) -> Set[str]:
         """Layer 2: Regex scan + Cloudflare __cf_email__ decode."""
+        html = _decode_js_escapes(html)
         emails = set()
 
         # Standard regex extraction
@@ -649,6 +679,7 @@ class AsyncWebScraper:
 
     def _decode_obfuscated_emails(self, html: str) -> Set[str]:
         """Decode HTML entity and [at]/[dot] obfuscated emails."""
+        html = _decode_js_escapes(html)
         emails: Set[str] = set()
 
         # Decode full HTML entities first, then scan for emails
@@ -676,9 +707,12 @@ class AsyncWebScraper:
 
     def _extract_footer_emails(self, html: str) -> Set[str]:
         """Extract emails from the footer area (last 20% of HTML)."""
+        html = _decode_js_escapes(html)
         emails: Set[str] = set()
         footer_start = int(len(html) * 0.8)
-        footer_html = html[footer_start:]
+        # Start at a space or tag edge: a cut inside "jane.roe@x.com" would read "roe@x.com".
+        edge = max(html.rfind(ch, 0, footer_start) for ch in " \t\r\n<>\"'")
+        footer_html = html[edge + 1 :] if edge >= 0 else html
 
         # Standard regex on footer area
         for match in _EMAIL_RE.findall(footer_html):
@@ -722,7 +756,7 @@ class AsyncWebScraper:
                     max_redirects=3,
                 ) as resp:
                     if resp.status == 200:
-                        body = await resp.content.read(_MAX_BODY_SIZE)
+                        body = await read_capped(resp.content, _MAX_BODY_SIZE)
                         html = body.decode("utf-8", errors="replace")
                         emails.update(self._extract_mailto(html))
                         emails.update(self._extract_emails(html))
@@ -791,6 +825,25 @@ class AsyncWebScraper:
         if elapsed_ms < 200:
             await asyncio.sleep((200 - elapsed_ms) / 1000)
         self._domain_last_request[domain] = time.monotonic()
+
+
+_EXTRACTOR: Optional[AsyncWebScraper] = None
+
+
+def extract_emails(html: str) -> Set[str]:
+    """Every address the scraper finds in one page: mailto links, page text, Cloudflare
+    obfuscation, JSON-LD, [at]/[dot] and entity spellings, and the footer."""
+    global _EXTRACTOR
+    if _EXTRACTOR is None:
+        _EXTRACTOR = AsyncWebScraper(max_concurrent=1)
+    s = _EXTRACTOR
+    return (
+        s._extract_mailto(html)
+        | s._extract_emails(html)
+        | s._extract_jsonld_emails(html)
+        | s._decode_obfuscated_emails(html)
+        | s._extract_footer_emails(html)
+    )
 
 
 # ── Synchronous wrapper for backward compatibility ───────────────────────────
