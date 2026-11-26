@@ -172,6 +172,23 @@ def _clean_url(url: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}{path}" + (f"?{parsed.query}" if parsed.query else "")
 
 
+def url_kind(url: str, root: str) -> Optional[int]:
+    """What kind of page an address is, from its path, or from its subdomain when the path says
+    nothing: Shiftwave's partner program is partners.shiftwave.co/, whose path is just "/"."""
+    parsed = urlparse(url)
+    kind = page_kind(parsed.path)
+    if kind is not None:
+        return kind
+    host = (parsed.hostname or "").lower()
+    if not root or not host.endswith("." + root):
+        return None
+    for label in host[: -len(root) - 1].split("."):
+        kind = page_kind(label)
+        if kind is not None:
+            return kind
+    return None
+
+
 def pick_pages(home: Page, host: str, root: str, limit: int = MAX_PAGES) -> List[str]:
     """The pages on the same site most likely to name people or give a way in, best first.
 
@@ -193,7 +210,7 @@ def pick_pages(home: Page, host: str, root: str, limit: int = MAX_PAGES) -> List
         if clean in seen or clean.rstrip("/") == home_clean:
             continue
         segments = [seg for seg in path.split("/") if seg]
-        kind = page_kind(segments[-1]) if segments else None
+        kind = url_kind(url, root)
         if kind is None and len(segments) <= 2:
             kind = page_kind(link.text.lower().replace(" ", "-"))
         if kind is None:
@@ -499,11 +516,13 @@ def _absorb(result: CompanyContacts, page: Page, source: str, live: bool) -> Non
     for phone in _phones(page):
         if phone not in result.phones:
             result.phones.append(phone)
-    if live and page.has_contact_form:
-        # the form on the contact page wins over one met on the way (a newsletter, a partner sign-up)
-        on_contact_page = page_kind(urlparse(page.url).path) == _CONTACT_KIND
+    page_kind_here = url_kind(page.url, result.root)
+    # a partner program's sign-up form is listed with the partner program, never as the contact form
+    if live and page.has_contact_form and page_kind_here != _PARTNER_KIND:
+        # the form on the contact page wins over one met on the way (a newsletter, a quote form)
         if not result.contact_form or (
-            on_contact_page and page_kind(urlparse(result.contact_form).path) != _CONTACT_KIND
+            page_kind_here == _CONTACT_KIND
+            and url_kind(result.contact_form, result.root) != _CONTACT_KIND
         ):
             result.contact_form = page.url
     for link in page.links:
@@ -511,13 +530,12 @@ def _absorb(result: CompanyContacts, page: Page, source: str, live: bool) -> Non
             if network not in result.socials and pattern.match(link.url):
                 result.socials[network] = link.url.rstrip("/")
         if live and link.url.startswith("http") and _same_site(link.url, result.host, result.root):
-            path = urlparse(link.url).path.lower()
             if (
-                page_kind(path) == _PARTNER_KIND
+                url_kind(link.url.lower(), result.root) == _PARTNER_KIND
                 and _clean_url(link.url) not in result.partner_pages
             ):
                 result.partner_pages.append(_clean_url(link.url))
-    if live and page_kind(urlparse(page.url).path.lower()) == _PARTNER_KIND:
+    if live and page_kind_here == _PARTNER_KIND:
         if _clean_url(page.url) not in result.partner_pages:
             result.partner_pages.append(_clean_url(page.url))
     for name, pattern in _PARTNER_PLATFORMS:

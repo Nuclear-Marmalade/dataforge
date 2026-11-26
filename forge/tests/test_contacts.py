@@ -10,6 +10,7 @@ from forge.contacts.archive import pick_snapshots
 from forge.contacts.export import COMPANY_COLUMNS, write_companies_csv, write_people_csv
 from forge.contacts.finder import (
     CompanyContacts,
+    _absorb,
     email_for,
     find_contacts,
     infer_email_format,
@@ -235,6 +236,73 @@ class TestPickPages:
             "https://acme.com/about-us",
             "https://acme.com/team",
         ]
+
+
+class TestPartnerSubdomain:
+    """A partner program on its own subdomain is a partner page, and its sign-up form is not the
+    company's contact form. Shiftwave's lives at partners.shiftwave.co/, whose address is just "/"."""
+
+    _SIGNUP = (
+        "<html><head><title>Join Acme Light's Partner Program</title></head><body>"
+        "<form><input type='email' name='email'><textarea name='message'></textarea></form>"
+        "</body></html>"
+    )
+    _CONTACT = (
+        "<html><head><title>Contact Acme Light</title></head><body>"
+        "<form><input type='email' name='email'><textarea name='message'></textarea></form>"
+        "</body></html>"
+    )
+
+    @staticmethod
+    def _result():
+        return CompanyContacts(
+            input="acmelight.co",
+            website="https://acmelight.co",
+            host="acmelight.co",
+            root="acmelight.co",
+        )
+
+    def test_the_address_kind_reads_the_subdomain_when_the_path_says_nothing(self):
+        from forge.contacts.finder import url_kind
+
+        assert url_kind("https://partners.acmelight.co/", "acmelight.co") == 4
+        assert url_kind("https://affiliates.acmelight.co/login", "acmelight.co") == 4
+        assert url_kind("https://shop.acmelight.co/pages/contact", "acmelight.co") == 2
+        assert url_kind("https://www.acmelight.co/", "acmelight.co") is None
+        assert url_kind("https://acmelight.co/", "acmelight.co") is None
+        assert url_kind("https://partners.othersite.com/", "acmelight.co") is None
+
+    def test_a_partner_subdomain_page_is_listed_as_the_partner_program_not_the_contact_form(self):
+        r = self._result()
+        page = parse_page(self._SIGNUP, "https://partners.acmelight.co/")
+        _absorb(r, page, page.url, live=True)
+        assert r.partner_pages == ["https://partners.acmelight.co"]
+        assert r.contact_form == ""
+
+    def test_a_link_to_a_partner_subdomain_is_a_partner_page(self):
+        r = self._result()
+        home = parse_page(
+            '<a href="https://partners.acmelight.co/">Partner Program</a>', "https://acmelight.co/"
+        )
+        _absorb(r, home, home.url, live=True)
+        assert r.partner_pages == ["https://partners.acmelight.co"]
+
+    def test_a_partner_subdomain_is_picked_even_when_its_link_text_says_nothing(self):
+        home = parse_page(
+            '<a href="https://partners.acmelight.co/">Join us</a>', "https://acmelight.co/"
+        )
+        assert "https://partners.acmelight.co" in pick_pages(home, "acmelight.co", "acmelight.co")
+
+    def test_the_contact_page_form_is_still_the_contact_form(self):
+        r = self._result()
+        for html, url in (
+            (self._SIGNUP, "https://partners.acmelight.co/"),
+            (self._CONTACT, "https://acmelight.co/contact"),
+        ):
+            page = parse_page(html, url)
+            _absorb(r, page, page.url, live=True)
+        assert r.contact_form == "https://acmelight.co/contact"
+        assert r.partner_pages == ["https://partners.acmelight.co"]
 
 
 class TestEmailFormat:
